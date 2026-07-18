@@ -1064,6 +1064,29 @@ textarea {
   background: linear-gradient(160deg, #333, #161616);
 }
 
+.video-download--thumb {
+  background-color: #111;
+  background-size: cover;
+  background-position: center;
+  position: relative;
+}
+
+.video-download--thumb::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.video-download--thumb > * {
+  position: relative;
+  z-index: 1;
+}
+
+.video-download--thumb:hover {
+  filter: brightness(1.05);
+}
+
 .video-download__icon {
   width: 44px;
   height: 44px;

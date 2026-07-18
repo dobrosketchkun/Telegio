@@ -26,8 +26,10 @@ import { error as logError, log, warn } from "./log.js";
 import {
   blobFromBase64Chunks,
   blobSliceToBase64Url,
+  captureVideoThumbDataUrl,
   compressImage,
   formatBytes,
+  isDeferredVideoSize,
   mediaChunkCount,
   mintMediaId,
   prepareVideo,
@@ -104,7 +106,7 @@ export class ChatSession {
     this._uploadWaiters = new Map();
     /** @type {Set<string>} */
     this._fetching = new Set();
-    /** @type {Map<string, { size: number, mime?: string, duration?: number }>} */
+    /** @type {Map<string, { size: number, mime?: string, duration?: number, senderPeerId?: string, thumbDataUrl?: string }>} */
     this._mediaMeta = new Map();
     /** @type {Set<string>} mediaIds user tapped Download for (or own sends). */
     this._mediaUnlocked = new Set();
@@ -168,6 +170,11 @@ export class ChatSession {
   /** @param {string} mediaId */
   isMediaUnlocked(mediaId) {
     return this._mediaUnlocked.has(mediaId);
+  }
+
+  /** @param {string} mediaId */
+  getMediaMeta(mediaId) {
+    return this._mediaMeta.get(mediaId);
   }
 
   /**
@@ -427,7 +434,9 @@ export class ChatSession {
   }
 
   /**
-   * Compress/prepare + upload images or one video to host store (or local if host).
+   * Compress/prepare + upload images or small videos to host.
+   * Videos over VIDEO_AUTO_DOWNLOAD_BYTES stay on the sender until Download —
+   * only a tiny poster frame rides with the chat message.
    * @param {Blob[]} files
    * @param {{ chatId?: string, onProgress?: (label: string) => void }} [opts]
    * @returns {Promise<{ mediaIds: string[], mediaKind?: "video", mediaInfo?: object[] }>}
@@ -450,6 +459,8 @@ export class ChatSession {
         ),
       );
       const mediaId = mintMediaId();
+      const deferred =
+        batch.mediaKind === "video" && isDeferredVideoSize(prepared.size);
       const entry = {
         mime: prepared.mime,
         size: prepared.size,
@@ -461,7 +472,21 @@ export class ChatSession {
         chatId: opts.chatId,
       };
 
-      if (this.role === "host") {
+      /** @type {string | undefined} */
+      let thumbDataUrl;
+      if (deferred) {
+        opts.onProgress?.("Making thumbnail…");
+        thumbDataUrl = await captureVideoThumbDataUrl(prepared.blob);
+        // Keep bytes on sender only — no host upload of the full video.
+        this.putLocalMedia(mediaId, entry);
+        this.unlockMedia(mediaId);
+        if (this.role === "host") {
+          // Host already has the file locally; register for later peer downloads.
+          const ok = this._hostAcceptMedia(mediaId, entry);
+          if (!ok) throw new Error("Host media budget exceeded");
+        }
+        opts.onProgress?.("Posting…");
+      } else if (this.role === "host") {
         const ok = this._hostAcceptMedia(mediaId, entry);
         if (!ok) throw new Error("Host media budget exceeded");
         this.unlockMedia(mediaId);
@@ -477,12 +502,19 @@ export class ChatSession {
         this.unlockMedia(mediaId);
       }
       mediaIds.push(mediaId);
+      this._mediaMeta.set(mediaId, {
+        size: prepared.size,
+        mime: prepared.mime,
+        duration: prepared.duration,
+        senderPeerId: this.selfPeerId,
+      });
       mediaInfo.push({
         size: prepared.size,
         mime: prepared.mime,
         duration: prepared.duration,
         width: prepared.width,
         height: prepared.height,
+        thumbDataUrl,
       });
     }
     return {
@@ -533,6 +565,8 @@ export class ChatSession {
         ),
       );
       const mediaId = mintMediaId();
+      const deferred =
+        batch.mediaKind === "video" && isDeferredVideoSize(prepared.size);
       const entry = {
         mime: prepared.mime,
         size: prepared.size,
@@ -545,20 +579,36 @@ export class ChatSession {
       };
       this.putLocalMedia(mediaId, entry);
       this.unlockMedia(mediaId);
-      opts.onProgress?.(
-        `Sending ${formatBytes(prepared.size)} (${i}/${batch.files.length})…`,
-      );
-      await this._transferMediaTo(other, mediaId, entry, {
-        dmId,
-        onProgress: opts.onProgress,
-      });
+
+      /** @type {string | undefined} */
+      let thumbDataUrl;
+      if (deferred) {
+        opts.onProgress?.("Making thumbnail…");
+        thumbDataUrl = await captureVideoThumbDataUrl(prepared.blob);
+        opts.onProgress?.("Posting…");
+      } else {
+        opts.onProgress?.(
+          `Sending ${formatBytes(prepared.size)} (${i}/${batch.files.length})…`,
+        );
+        await this._transferMediaTo(other, mediaId, entry, {
+          dmId,
+          onProgress: opts.onProgress,
+        });
+      }
       mediaIds.push(mediaId);
+      this._mediaMeta.set(mediaId, {
+        size: prepared.size,
+        mime: prepared.mime,
+        duration: prepared.duration,
+        senderPeerId: this.selfPeerId,
+      });
       mediaInfo.push({
         size: prepared.size,
         mime: prepared.mime,
         duration: prepared.duration,
         width: prepared.width,
         height: prepared.height,
+        thumbDataUrl,
       });
     }
 
@@ -621,26 +671,27 @@ export class ChatSession {
   }
 
   /**
-   * Request any missing media ids (group path).
-   * Videos larger than VIDEO_AUTO_DOWNLOAD_BYTES are skipped unless force.
+   * Request any missing media ids.
+   * Videos larger than VIDEO_AUTO_DOWNLOAD_BYTES are skipped unless force —
+   * then fetched from the original sender (not uploaded at post time).
    * @param {string[]} mediaIds
-   * @param {{ force?: boolean, sizes?: Record<string, number> }} [opts]
+   * @param {{ force?: boolean, sizes?: Record<string, number>, mimes?: Record<string, string>, senders?: Record<string, string> }} [opts]
    */
   ensureMedia(mediaIds, opts = {}) {
-    if (!this.hostState) return;
-    const hostId = getHostPeerId(this.hostState);
+    if (!this.hostState && !opts.senders) return;
+    const hostId = this.hostState ? getHostPeerId(this.hostState) : null;
     for (const id of mediaIds || []) {
       if (!id) continue;
       if (opts.force) this.unlockMedia(id);
-      const knownSize =
-        opts.sizes?.[id] ?? this._mediaMeta.get(id)?.size ?? 0;
-      const mime = String(
-        opts.mimes?.[id] || this._mediaMeta.get(id)?.mime || "",
-      ).toLowerCase();
+      const meta = this._mediaMeta.get(id);
+      const knownSize = opts.sizes?.[id] ?? meta?.size ?? 0;
+      const mime = String(opts.mimes?.[id] || meta?.mime || "").toLowerCase();
       const isVideo = mime.startsWith("video/");
+      const senderPeerId =
+        opts.senders?.[id] || meta?.senderPeerId || undefined;
       const largeLocked =
         isVideo &&
-        knownSize > VIDEO_AUTO_DOWNLOAD_BYTES &&
+        isDeferredVideoSize(knownSize) &&
         !opts.force &&
         !this._mediaUnlocked.has(id);
       // Large videos: recipients must tap Download (unless force / already unlocked).
@@ -659,22 +710,29 @@ export class ChatSession {
         continue;
       }
       if (this._fetching.has(id)) continue;
+
+      // Large / deferred videos live on the sender until Download.
+      const target =
+        isVideo && isDeferredVideoSize(knownSize) && senderPeerId
+          ? senderPeerId
+          : hostId;
+      if (!target || target === this.selfPeerId) {
+        if (opts.force) {
+          this.hooks.onError(
+            "Video is only on the sender’s device — they may be offline.",
+          );
+        }
+        continue;
+      }
+
       this._fetching.add(id);
-      if (this.role === "host") {
-        this._fetching.delete(id);
-        continue;
-      }
-      if (!hostId) {
-        this._fetching.delete(id);
-        continue;
-      }
-      log("media", "request", id);
-      this._send(encodeFrame("media-request", { mediaId: id }), hostId);
+      log("media", "request", id, "→", target);
+      this._send(encodeFrame("media-request", { mediaId: id }), target);
     }
   }
 
   /**
-   * Remember size/mime from messages so large-video UI can show before fetch.
+   * Remember size/mime/sender from messages so large-video UI can show before fetch.
    * @param {import("./engine.js").Message} message
    */
   rememberMediaInfo(message) {
@@ -682,11 +740,14 @@ export class ChatSession {
     const infos = message.mediaInfo || [];
     message.mediaIds.forEach((id, i) => {
       const info = infos[i];
-      if (!info) return;
+      if (!info && !message.senderPeerId) return;
+      const prev = this._mediaMeta.get(id) || {};
       this._mediaMeta.set(id, {
-        size: Number(info.size) || 0,
-        mime: info.mime,
-        duration: info.duration,
+        size: Number(info?.size) || prev.size || 0,
+        mime: info?.mime || prev.mime,
+        duration: info?.duration ?? prev.duration,
+        senderPeerId: message.senderPeerId || prev.senderPeerId,
+        thumbDataUrl: info?.thumbDataUrl || prev.thumbDataUrl,
       });
     });
   }
@@ -1052,16 +1113,20 @@ export class ChatSession {
         if (body.message.mediaIds?.length) {
           const sizes = Object.create(null);
           const mimes = Object.create(null);
+          const senders = Object.create(null);
           body.message.mediaIds.forEach((id, i) => {
             const sz = body.message.mediaInfo?.[i]?.size;
             if (sz != null) sizes[id] = sz;
             const mime = body.message.mediaInfo?.[i]?.mime;
             if (mime) mimes[id] = mime;
+            if (body.message.senderPeerId) {
+              senders[id] = body.message.senderPeerId;
+            }
           });
           if (body.message.senderPeerId === this.selfPeerId) {
             body.message.mediaIds.forEach((id) => this.unlockMedia(id));
           }
-          this.ensureMedia(body.message.mediaIds, { sizes, mimes });
+          this.ensureMedia(body.message.mediaIds, { sizes, mimes, senders });
         }
       }
       this.hooks.onChange();
@@ -1290,16 +1355,20 @@ export class ChatSession {
         if (effect.message.mediaIds?.length) {
           const sizes = Object.create(null);
           const mimes = Object.create(null);
+          const senders = Object.create(null);
           effect.message.mediaIds.forEach((id, i) => {
             const sz = effect.message.mediaInfo?.[i]?.size;
             if (sz != null) sizes[id] = sz;
             const mime = effect.message.mediaInfo?.[i]?.mime;
             if (mime) mimes[id] = mime;
+            if (effect.message.senderPeerId) {
+              senders[id] = effect.message.senderPeerId;
+            }
           });
           if (effect.message.senderPeerId === this.selfPeerId) {
             effect.message.mediaIds.forEach((id) => this.unlockMedia(id));
           }
-          this.ensureMedia(effect.message.mediaIds, { sizes, mimes });
+          this.ensureMedia(effect.message.mediaIds, { sizes, mimes, senders });
         }
       }
     }

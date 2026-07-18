@@ -3,8 +3,14 @@ import {
   MEDIA_CHUNK_BYTES,
   MEDIA_JPEG_QUALITY,
   MEDIA_MAX_DIMENSION,
+  VIDEO_AUTO_DOWNLOAD_BYTES,
 } from "./constants.js";
 import { mintId } from "./ids.js";
+
+/** True when full video bytes should stay on sender until Download is tapped. */
+export function isDeferredVideoSize(size) {
+  return Number(size) > VIDEO_AUTO_DOWNLOAD_BYTES;
+}
 
 /**
  * @typedef {{
@@ -238,6 +244,71 @@ export async function prepareVideo(input) {
       duration: Number.isFinite(meta.duration) ? meta.duration : 0,
       size: input.size,
     };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/**
+ * Tiny JPEG poster frame for >10MB videos (travels with the message, not as a media transfer).
+ * @param {Blob | File} input
+ * @returns {Promise<string | undefined>} data URL
+ */
+export async function captureVideoThumbDataUrl(input) {
+  if (!(input instanceof Blob)) return undefined;
+  const url = URL.createObjectURL(input);
+  try {
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "auto";
+    await new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error("thumb timeout")), 4000);
+      video.onloadeddata = () => {
+        clearTimeout(t);
+        resolve(undefined);
+      };
+      video.onerror = () => {
+        clearTimeout(t);
+        reject(new Error("thumb load failed"));
+      };
+      video.src = url;
+    });
+    const duration = Number.isFinite(video.duration) ? video.duration : 0;
+    const seekTo =
+      duration > 1 ? Math.min(duration * 0.15, duration - 0.05) : 0;
+    if (seekTo > 0) {
+      await new Promise((resolve) => {
+        const t = setTimeout(resolve, 1500);
+        video.onseeked = () => {
+          clearTimeout(t);
+          resolve(undefined);
+        };
+        try {
+          video.currentTime = seekTo;
+        } catch {
+          clearTimeout(t);
+          resolve(undefined);
+        }
+      });
+    }
+    const vw = video.videoWidth || 0;
+    const vh = video.videoHeight || 0;
+    if (!vw || !vh) return undefined;
+    const maxEdge = 320;
+    const scale = Math.min(1, maxEdge / Math.max(vw, vh));
+    const w = Math.max(1, Math.round(vw * scale));
+    const h = Math.max(1, Math.round(vh * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return undefined;
+    ctx.drawImage(video, 0, 0, w, h);
+    const dataUrl = canvas.toDataURL("image/jpeg", 0.72);
+    return dataUrl.length < 120_000 ? dataUrl : undefined;
+  } catch {
+    return undefined;
   } finally {
     URL.revokeObjectURL(url);
   }

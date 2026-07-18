@@ -1036,22 +1036,30 @@ function normalizeMediaIds(raw) {
 /**
  * @param {unknown} raw
  * @param {number} len
- * @returns {{ size: number, mime?: string, duration?: number, width?: number, height?: number }[] | undefined}
+ * @returns {{ size: number, mime?: string, duration?: number, width?: number, height?: number, thumbDataUrl?: string }[] | undefined}
  */
 function normalizeMediaInfo(raw, len) {
   if (!Array.isArray(raw) || !len) return undefined;
-  /** @type {{ size: number, mime?: string, duration?: number, width?: number, height?: number }[]} */
+  /** @type {{ size: number, mime?: string, duration?: number, width?: number, height?: number, thumbDataUrl?: string }[]} */
   const out = [];
   for (let i = 0; i < len; i++) {
     const item = raw[i];
     if (!item || typeof item !== "object") continue;
     const size = Number(/** @type {{ size?: number }} */ (item).size) || 0;
+    const thumbRaw = /** @type {{ thumbDataUrl?: string }} */ (item).thumbDataUrl;
+    const thumbDataUrl =
+      typeof thumbRaw === "string" &&
+      thumbRaw.startsWith("data:image/") &&
+      thumbRaw.length < 120_000
+        ? thumbRaw
+        : undefined;
     out.push({
       size,
       mime: /** @type {{ mime?: string }} */ (item).mime,
       duration: /** @type {{ duration?: number }} */ (item).duration,
       width: /** @type {{ width?: number }} */ (item).width,
       height: /** @type {{ height?: number }} */ (item).height,
+      thumbDataUrl,
     });
   }
   return out.length ? out : undefined;

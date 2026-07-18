@@ -13,8 +13,10 @@ import { buildFixture } from "../fixture.js";
 import { isFixtureMode, readJoinSessionId } from "../invite.js";
 import { log } from "../log.js";
 import {
+  captureVideoThumbDataUrl,
   compressImage,
   formatBytes,
+  isDeferredVideoSize,
   mintMediaId,
   prepareVideo,
 } from "../media.js";
@@ -358,7 +360,15 @@ function paint() {
         if (mode === "online" && session) {
           setUploadStatus("Downloading video…");
           session.unlockMedia(mediaId);
-          session.ensureMedia([mediaId], { force: true });
+          const meta = session.getMediaMeta(mediaId);
+          session.ensureMedia([mediaId], {
+            force: true,
+            sizes: meta?.size != null ? { [mediaId]: meta.size } : undefined,
+            mimes: meta?.mime ? { [mediaId]: meta.mime } : undefined,
+            senders: meta?.senderPeerId
+              ? { [mediaId]: meta.senderPeerId }
+              : undefined,
+          });
           paint();
         } else if (mode === "fixture") {
           unlockedFixtureMedia.add(mediaId);
@@ -368,24 +378,26 @@ function paint() {
     },
   );
 
-  // Pull missing group media while viewing (large videos wait for tap)
-  if (mode === "online" && session && thread?.kind === "group") {
+  // Pull missing media while viewing (large videos wait for tap → fetch from sender)
+  if (mode === "online" && session && thread) {
     for (const msg of thread.messages) {
       if (!msg.mediaIds?.length) continue;
       session.rememberMediaInfo(msg);
       const sizes = Object.create(null);
       const mimes = Object.create(null);
+      const senders = Object.create(null);
       msg.mediaIds.forEach((id, i) => {
         const sz = msg.mediaInfo?.[i]?.size;
         if (sz != null) sizes[id] = sz;
         const mime = msg.mediaInfo?.[i]?.mime;
         if (mime) mimes[id] = mime;
+        if (msg.senderPeerId) senders[id] = msg.senderPeerId;
       });
       // Sender already has bytes; everyone else skips large videos until Download.
       if (msg.senderPeerId === store.selfPeerId) {
         msg.mediaIds.forEach((id) => session.unlockMedia(id));
       }
-      session.ensureMedia(msg.mediaIds, { sizes, mimes });
+      session.ensureMedia(msg.mediaIds, { sizes, mimes, senders });
     }
     // Clear download status once blobs arrive
     if (
@@ -931,6 +943,11 @@ async function sendPendingMedia() {
           setUploadStatus(`Preparing video… ${formatBytes(file.size)}`);
           const prepared = await prepareVideo(file);
           const id = mintMediaId();
+          let thumbDataUrl;
+          if (isDeferredVideoSize(prepared.size)) {
+            setUploadStatus("Making thumbnail…");
+            thumbDataUrl = await captureVideoThumbDataUrl(prepared.blob);
+          }
           fixtureStore.media.set(id, {
             blob: prepared.blob,
             mime: prepared.mime,
@@ -939,6 +956,7 @@ async function sendPendingMedia() {
             height: prepared.height,
             duration: prepared.duration,
             senderPeerId: fixtureStore.selfPeerId,
+            thumbDataUrl,
           });
           unlockedFixtureMedia.add(id);
           mediaIds.push(id);
@@ -966,6 +984,7 @@ async function sendPendingMedia() {
           duration: e?.duration,
           width: e?.width,
           height: e?.height,
+          thumbDataUrl: e?.thumbDataUrl,
         };
       });
       if (thread.kind === "group") {

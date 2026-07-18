@@ -251,6 +251,11 @@ export function renderThread(
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "video-download";
+        const thumb = info?.thumbDataUrl;
+        if (thumb) {
+          btn.classList.add("video-download--thumb");
+          btn.style.backgroundImage = `url("${thumb}")`;
+        }
         btn.innerHTML = `<span class="video-download__icon">▶</span><span class="video-download__label">Download video</span><span class="video-download__size"></span>`;
         const sizeEl = btn.querySelector(".video-download__size");
         if (sizeEl) {
