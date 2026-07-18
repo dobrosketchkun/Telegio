@@ -172,6 +172,28 @@ export async function blobToBase64Chunks(blob, chunkSize = MEDIA_CHUNK_BYTES) {
 }
 
 /**
+ * Encode one slice of a blob as base64url (avoids loading whole file into RAM).
+ * @param {Blob} blob
+ * @param {number} offset
+ * @param {number} [chunkSize]
+ */
+export async function blobSliceToBase64Url(
+  blob,
+  offset,
+  chunkSize = MEDIA_CHUNK_BYTES,
+) {
+  const slice = blob.slice(offset, offset + chunkSize);
+  const u8 = new Uint8Array(await slice.arrayBuffer());
+  return uint8ToBase64Url(u8);
+}
+
+/** @param {number} size @param {number} [chunkSize] */
+export function mediaChunkCount(size, chunkSize = MEDIA_CHUNK_BYTES) {
+  const n = Math.ceil((Number(size) || 0) / chunkSize);
+  return n > 0 ? n : 1;
+}
+
+/**
  * Reassemble chunks into a Blob.
  * @param {string[]} b64Chunks
  * @param {string} mime
@@ -192,6 +214,7 @@ export function blobFromBase64Chunks(b64Chunks, mime) {
 
 /**
  * Prepare video for send (no re-encode, no size reject).
+ * Metadata probe is time-capped so huge files do not hang the send button.
  * @param {Blob | File} input
  * @returns {Promise<PreparedVideo>}
  */
@@ -203,10 +226,10 @@ export async function prepareVideo(input) {
     throw new Error("Not a video");
   }
 
+  const mime = input.type || "video/mp4";
   const url = URL.createObjectURL(input);
   try {
-    const meta = await readVideoMetadata(url);
-    const mime = input.type || "video/mp4";
+    const meta = await readVideoMetadata(url, 2500);
     return {
       blob: input,
       mime,
@@ -230,28 +253,38 @@ export function formatBytes(n) {
 
 /**
  * @param {string} url
+ * @param {number} [timeoutMs]
  * @returns {Promise<{ duration: number, width: number, height: number }>}
  */
-function readVideoMetadata(url) {
-  return new Promise((resolve, reject) => {
+function readVideoMetadata(url, timeoutMs = 2500) {
+  return new Promise((resolve) => {
     const video = document.createElement("video");
     video.preload = "metadata";
     video.muted = true;
     video.playsInline = true;
-    const cleanup = () => {
+    let done = false;
+    const finish = (meta) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      video.onloadedmetadata = null;
+      video.onerror = null;
       video.removeAttribute("src");
       video.load();
+      resolve(meta);
     };
+    const timer = setTimeout(() => {
+      finish({ duration: 0, width: 0, height: 0 });
+    }, timeoutMs);
     video.onloadedmetadata = () => {
-      const duration = video.duration;
-      const width = video.videoWidth || 0;
-      const height = video.videoHeight || 0;
-      cleanup();
-      resolve({ duration, width, height });
+      finish({
+        duration: video.duration,
+        width: video.videoWidth || 0,
+        height: video.videoHeight || 0,
+      });
     };
     video.onerror = () => {
-      cleanup();
-      reject(new Error("Could not read video metadata"));
+      finish({ duration: 0, width: 0, height: 0 });
     };
     video.src = url;
   });

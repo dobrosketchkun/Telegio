@@ -72,6 +72,7 @@ export function renderChatList(root, chats, activeId, unread, onSelect) {
  *   onReply?: (messageId: string) => void,
  *   onEdit?: (messageId: string) => void,
  *   getMediaUrl?: (mediaId: string) => string | null,
+ *   getPlayableMediaUrl?: (mediaId: string, gate?: object) => string | null,
  *   getMediaMime?: (mediaId: string) => string | null,
  *   onOpenMedia?: (url: string) => void,
  *   onDownloadMedia?: (mediaId: string) => void,
@@ -228,8 +229,16 @@ export function renderThread(
       const mid = msg.mediaIds[0];
       const info = msg.mediaInfo?.[0];
       const size = Number(info?.size) || 0;
+      const outgoing = msg.senderPeerId === selfPeerId;
+      const mime = info?.mime;
       const url =
-        typeof opts.getMediaUrl === "function" ? opts.getMediaUrl(mid) : null;
+        typeof opts.getPlayableMediaUrl === "function"
+          ? opts.getPlayableMediaUrl(mid, { size, mime, outgoing })
+          : typeof opts.getMediaUrl === "function"
+            ? opts.getMediaUrl(mid)
+            : null;
+      const needsDownload =
+        !outgoing && size > VIDEO_AUTO_DOWNLOAD_BYTES && !url;
       if (url) {
         const video = document.createElement("video");
         video.className = "media-video";
@@ -238,13 +247,15 @@ export function renderThread(
         video.playsInline = true;
         video.preload = "metadata";
         wrap.append(video);
-      } else if (size > VIDEO_AUTO_DOWNLOAD_BYTES) {
+      } else if (needsDownload || size > VIDEO_AUTO_DOWNLOAD_BYTES) {
         const btn = document.createElement("button");
         btn.type = "button";
         btn.className = "video-download";
         btn.innerHTML = `<span class="video-download__icon">▶</span><span class="video-download__label">Download video</span><span class="video-download__size"></span>`;
-        btn.querySelector(".video-download__size").textContent =
-          formatBytes(size);
+        const sizeEl = btn.querySelector(".video-download__size");
+        if (sizeEl) {
+          sizeEl.textContent = size ? formatBytes(size) : "";
+        }
         btn.addEventListener("click", (e) => {
           e.stopPropagation();
           opts.onDownloadMedia?.(mid);

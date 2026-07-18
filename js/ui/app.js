@@ -8,11 +8,16 @@ import {
   listChatsForUi,
 } from "../engine.js";
 import { parseMarkdownLite, toMarkdownLite } from "../entities.js";
-import { MAX_ALBUM_ITEMS } from "../constants.js";
+import { MAX_ALBUM_ITEMS, VIDEO_AUTO_DOWNLOAD_BYTES } from "../constants.js";
 import { buildFixture } from "../fixture.js";
 import { isFixtureMode, readJoinSessionId } from "../invite.js";
 import { log } from "../log.js";
-import { compressImage, mintMediaId, prepareVideo } from "../media.js";
+import {
+  compressImage,
+  formatBytes,
+  mintMediaId,
+  prepareVideo,
+} from "../media.js";
 import { selfCheckEnvelope } from "../protocol.js";
 import { ChatSession } from "../session.js";
 import { ensureFixturePacks } from "../stickers.js";
@@ -345,12 +350,18 @@ function paint() {
       onReply: (messageId) => setReply(messageId),
       onEdit: (messageId) => setEdit(messageId),
       getMediaUrl: (mediaId) => resolveMediaUrl(mediaId),
+      getPlayableMediaUrl: (mediaId, gate) =>
+        resolvePlayableMediaUrl(mediaId, gate),
       getMediaMime: (mediaId) => resolveMediaMime(mediaId),
       onOpenMedia: (url) => openLightbox(url),
       onDownloadMedia: (mediaId) => {
         if (mode === "online" && session) {
           setUploadStatus("Downloading video…");
+          session.unlockMedia(mediaId);
           session.ensureMedia([mediaId], { force: true });
+          paint();
+        } else if (mode === "fixture") {
+          unlockedFixtureMedia.add(mediaId);
           paint();
         }
       },
@@ -363,11 +374,18 @@ function paint() {
       if (!msg.mediaIds?.length) continue;
       session.rememberMediaInfo(msg);
       const sizes = Object.create(null);
+      const mimes = Object.create(null);
       msg.mediaIds.forEach((id, i) => {
         const sz = msg.mediaInfo?.[i]?.size;
         if (sz != null) sizes[id] = sz;
+        const mime = msg.mediaInfo?.[i]?.mime;
+        if (mime) mimes[id] = mime;
       });
-      session.ensureMedia(msg.mediaIds, { sizes });
+      // Sender already has bytes; everyone else skips large videos until Download.
+      if (msg.senderPeerId === store.selfPeerId) {
+        msg.mediaIds.forEach((id) => session.unlockMedia(id));
+      }
+      session.ensureMedia(msg.mediaIds, { sizes, mimes });
     }
     // Clear download status once blobs arrive
     if (
@@ -720,12 +738,35 @@ function openNewGroupModal() {
   );
 }
 
+/** @type {Set<string>} */
+const unlockedFixtureMedia = new Set();
+
 function resolveMediaMime(mediaId) {
   if (mode === "online" && session) {
     return session.getMediaEntry(mediaId)?.mime || null;
   }
   if (mode === "fixture" && fixtureStore?.media) {
     return fixtureStore.media.get(mediaId)?.mime || null;
+  }
+  return null;
+}
+
+function resolvePlayableMediaUrl(mediaId, gate = {}) {
+  if (mode === "online" && session) {
+    return session.getPlayableMediaUrl(mediaId, gate);
+  }
+  if (mode === "fixture" && fixtureStore?.media) {
+    const entry = fixtureStore.media.get(mediaId);
+    if (!entry?.blob) return null;
+    const size = Number(gate.size) || entry.size || 0;
+    const mime = String(gate.mime || entry.mime || "").toLowerCase();
+    const large =
+      mime.startsWith("video/") && size > VIDEO_AUTO_DOWNLOAD_BYTES;
+    if (large && !gate.outgoing && !unlockedFixtureMedia.has(mediaId)) {
+      return null;
+    }
+    if (!entry.objectUrl) entry.objectUrl = URL.createObjectURL(entry.blob);
+    return entry.objectUrl;
   }
   return null;
 }
@@ -887,7 +928,7 @@ async function sendPendingMedia() {
       for (const file of files) {
         i += 1;
         if (isVideo) {
-          setUploadStatus("Preparing video…");
+          setUploadStatus(`Preparing video… ${formatBytes(file.size)}`);
           const prepared = await prepareVideo(file);
           const id = mintMediaId();
           fixtureStore.media.set(id, {
@@ -899,6 +940,7 @@ async function sendPendingMedia() {
             duration: prepared.duration,
             senderPeerId: fixtureStore.selfPeerId,
           });
+          unlockedFixtureMedia.add(id);
           mediaIds.push(id);
         } else {
           setUploadStatus(`Compressing ${i}/${files.length}…`);
@@ -958,6 +1000,11 @@ async function sendPendingMedia() {
         fixtureStore = { ...fixtureStore, dmState: r.state, media: fixtureStore.media };
       }
     } else if (session && !session.sessionEnded) {
+      const label =
+        files.length === 1 && files[0].type.startsWith("video/")
+          ? `Preparing video… ${formatBytes(files[0].size)}`
+          : "Preparing media…";
+      setUploadStatus(label);
       if (thread.kind === "group") {
         const uploaded = await session.uploadGroupMedia(files, {
           chatId: activeChatId,
@@ -987,7 +1034,9 @@ async function sendPendingMedia() {
     clearPendingFiles();
     clearReply();
   } catch (e) {
-    showBanner(e?.message || String(e), false);
+    const msg = e?.message || String(e);
+    console.error("[ephchat] media send failed", e);
+    showBanner(msg, false);
   } finally {
     sendingMedia = false;
     setUploadStatus("");
