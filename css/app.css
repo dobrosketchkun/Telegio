@@ -303,11 +303,34 @@ textarea {
 }
 
 .sidebar__title {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  cursor: default;
+  font: inherit;
   font-size: 15px;
   font-weight: 600;
-  white-space: nowrap;
+  color: inherit;
+  text-align: left;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar__title.is-editable {
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+
+.sidebar__title.is-editable:hover {
+  opacity: 0.85;
+}
+
+.sidebar__hint {
+  margin: 0 12px 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
 .chat-list {
@@ -316,6 +339,23 @@ textarea {
   list-style: none;
   margin: 0;
   padding: 6px 0;
+}
+
+.chat-list__empty {
+  padding: 16px 14px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.chat-list li {
+  position: relative;
+}
+
+.chat-list__menu {
+  display: flex;
+  gap: 4px;
+  padding: 0 12px 8px 70px;
 }
 
 .chat-list__item {
@@ -515,6 +555,7 @@ textarea {
 .compose-wrap {
   background: var(--bg-compose);
   border-top: 1px solid var(--border);
+  padding-bottom: env(safe-area-inset-bottom, 0);
 }
 
 .compose-hint {
@@ -1311,6 +1352,51 @@ textarea {
   background: rgba(229, 57, 53, 0.95);
 }
 
+.bubble__forward {
+  font-size: 12px;
+  font-weight: 600;
+  opacity: 0.75;
+  margin-bottom: 4px;
+}
+
+.bubble__reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.reaction-chip {
+  border: 0;
+  background: rgba(0, 0, 0, 0.06);
+  border-radius: 12px;
+  padding: 2px 8px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.reaction-chip.is-mine {
+  background: rgba(53, 120, 200, 0.18);
+}
+
+.reaction-picker {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg-elevated, #fff);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.reaction-picker__btn {
+  border: 0;
+  background: transparent;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
 @media (max-width: 720px) {
   .app {
     flex-direction: column;
@@ -1318,12 +1404,37 @@ textarea {
 
   .sidebar {
     width: 100%;
-    max-height: 40%;
+    max-height: none;
+    flex: 1;
     border-right: 0;
     border-bottom: 1px solid var(--border);
   }
 
+  .main {
+    display: none;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .app.app--chat-open .sidebar {
+    display: none;
+  }
+
+  .app.app--chat-open .main {
+    display: flex;
+  }
+
+  .chat-header__back {
+    display: inline-grid !important;
+  }
+
   .messages {
     padding: 12px 10px 16px;
+  }
+}
+
+@media (min-width: 721px) {
+  .chat-header__back {
+    display: none !important;
   }
 }

@@ -184,7 +184,7 @@ export async function buildFixture(pack = null) {
     {
       type: "send-text",
       chatId: notesId,
-      text: "Phase 6 fixture: stickers + photos + albums + video + audio + files",
+      text: "Phase 7 fixture: polish — reactions, forward, pin/mute",
     },
     { actorPeerId: PEERS.mira.peerId },
   );
@@ -516,6 +516,64 @@ export async function buildFixture(pack = null) {
   });
   if (!dr.ok) throw new Error(dr.error);
   dmState = dr.state;
+
+  const reactTarget =
+    hostState.groupMessages[groupId]?.find((m) => m.kind === "text") ||
+    hostState.groupMessages[groupId]?.[0];
+  if (reactTarget) {
+    r = applyHost(
+      hostState,
+      {
+        type: "set-reaction",
+        chatId: groupId,
+        messageId: reactTarget.id,
+        emoji: "👍",
+      },
+      { actorPeerId: PEERS.self.peerId },
+    );
+    if (!r.ok) throw new Error(r.error);
+    hostState = r.state;
+    r = applyHost(
+      hostState,
+      {
+        type: "set-reaction",
+        chatId: groupId,
+        messageId: reactTarget.id,
+        emoji: "🔥",
+      },
+      { actorPeerId: PEERS.mira.peerId },
+    );
+    if (!r.ok) throw new Error(r.error);
+    hostState = r.state;
+  }
+
+  const dmText = dmState.dmMessages[dmId]?.find((m) => m.kind === "text");
+  if (dmText) {
+    dr = applyDm(dmState, PEERS.self.peerId, {
+      type: "dm-reaction",
+      dmId,
+      messageId: dmText.id,
+      emoji: "❤️",
+    });
+    if (!dr.ok) throw new Error(dr.error);
+    dmState = dr.state;
+  }
+
+  if (reactTarget && notesId) {
+    r = applyHost(
+      hostState,
+      {
+        type: "forward-message",
+        fromChatId: groupId,
+        messageId: reactTarget.id,
+        toChatId: notesId,
+        fromName: "Mira",
+      },
+      { actorPeerId: PEERS.self.peerId },
+    );
+    if (!r.ok) throw new Error(r.error);
+    hostState = r.state;
+  }
 
   return {
     selfPeerId: PEERS.self.peerId,

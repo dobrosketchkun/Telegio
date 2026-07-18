@@ -15,6 +15,8 @@ import { sanitizeFileName } from "./media.js";
  *   text?: string,
  *   entities?: { type: string, offset: number, length: number, url?: string }[],
  *   replyTo?: string,
+ *   forward?: { fromName: string, fromPeerId?: string, originalId?: string, fromChatId?: string },
+ *   reactions?: { emoji: string, peerIds: string[] }[],
  *   delivery?: { ackedBy: string[] },
  *   sticker?: { pack: string, stickerId: string },
  *   mediaIds?: string[],
@@ -212,6 +214,7 @@ export function applyHost(state, action, ctx) {
       if (!text.trim()) {
         return { ok: false, error: "Empty message" };
       }
+      const fwd = normalizeForward(action.forward);
       const msg = {
         id: mintId("m"),
         chatId,
@@ -221,6 +224,7 @@ export function applyHost(state, action, ctx) {
         text,
         entities: Array.isArray(action.entities) ? action.entities : undefined,
         replyTo: action.replyTo,
+        forward: fwd,
         delivery: { ackedBy: [] },
       };
       next.groupMessages[chatId] = [...(next.groupMessages[chatId] || []), msg];
@@ -252,6 +256,7 @@ export function applyHost(state, action, ctx) {
         kind: /** @type {const} */ ("sticker"),
         sticker: { pack, stickerId },
         replyTo: action.replyTo,
+        forward: normalizeForward(action.forward),
         delivery: { ackedBy: [] },
       };
       next.groupMessages[chatId] = [...(next.groupMessages[chatId] || []), msg];
@@ -318,6 +323,7 @@ export function applyHost(state, action, ctx) {
         text: caption.trim() ? caption : undefined,
         entities: Array.isArray(action.entities) ? action.entities : undefined,
         replyTo: action.replyTo,
+        forward: normalizeForward(action.forward),
         delivery: { ackedBy: [] },
       };
       next.groupMessages[chatId] = [...(next.groupMessages[chatId] || []), msg];
@@ -462,6 +468,130 @@ export function applyHost(state, action, ctx) {
       return { ok: true, state: next, effects };
     }
 
+    case "admin-rename-session": {
+      if (!isHostPeer(next, actor)) {
+        return { ok: false, error: "Only host can rename session" };
+      }
+      const title = String(action.title || "").trim();
+      if (!title) return { ok: false, error: "Empty title" };
+      if (title.length > 80) {
+        return { ok: false, error: "Title too long" };
+      }
+      next.session.title = title;
+      effects.push({ event: "session-renamed", title });
+      return { ok: true, state: next, effects };
+    }
+
+    case "admin-kick": {
+      if (!isHostPeer(next, actor)) {
+        return { ok: false, error: "Only host can kick" };
+      }
+      const peerId = String(action.peerId || "").trim();
+      if (!peerId) return { ok: false, error: "Missing peer" };
+      if (isHostPeer(next, peerId)) {
+        return { ok: false, error: "Cannot kick host" };
+      }
+      if (!rosterHas(next, peerId)) {
+        return { ok: false, error: "Peer not in roster" };
+      }
+      next.roster = next.roster.filter((r) => r.peerId !== peerId);
+      for (const [id, chat] of Object.entries(next.groups)) {
+        if (!chat.memberPeerIds.includes(peerId)) continue;
+        const previousMembers = [...chat.memberPeerIds];
+        chat.memberPeerIds = chat.memberPeerIds.filter((p) => p !== peerId);
+        if (chat.memberPeerIds.length < 2) {
+          delete next.groups[id];
+          delete next.groupMessages[id];
+          effects.push({
+            event: "chat-deleted",
+            chatId: id,
+            memberPeerIds: previousMembers,
+          });
+        } else {
+          effects.push({ event: "chat-created", chat: clone(chat) });
+        }
+      }
+      effects.push({ event: "peer-kicked", peerId });
+      return { ok: true, state: next, effects };
+    }
+
+    case "set-reaction": {
+      const chatId = action.chatId;
+      const messageId = action.messageId;
+      const emoji = String(action.emoji || "").trim();
+      if (!chatId || !next.groups[chatId]) {
+        return { ok: false, error: "Unknown group" };
+      }
+      if (!next.groups[chatId].memberPeerIds.includes(actor)) {
+        return { ok: false, error: "Not a group member" };
+      }
+      if (!messageId || !emoji) {
+        return { ok: false, error: "Missing reaction" };
+      }
+      if (emoji.length > 8) {
+        return { ok: false, error: "Invalid emoji" };
+      }
+      const msgs = next.groupMessages[chatId] || [];
+      const idx = msgs.findIndex((m) => m.id === messageId);
+      if (idx < 0) return { ok: false, error: "Unknown message" };
+      const msg = msgs[idx];
+      if (msg.kind === "system") {
+        return { ok: false, error: "Cannot react to system message" };
+      }
+      const updated = {
+        ...msg,
+        reactions: toggleReaction(msg.reactions, emoji, actor),
+      };
+      next.groupMessages[chatId] = [
+        ...msgs.slice(0, idx),
+        updated,
+        ...msgs.slice(idx + 1),
+      ];
+      effects.push({ event: "message-updated", chatId, message: updated });
+      return { ok: true, state: next, effects };
+    }
+
+    case "forward-message": {
+      const fromChatId = action.fromChatId;
+      const toChatId = action.toChatId;
+      const messageId = action.messageId;
+      if (!fromChatId || !toChatId || !messageId) {
+        return { ok: false, error: "Missing forward fields" };
+      }
+      if (!next.groups[fromChatId] || !next.groups[toChatId]) {
+        return { ok: false, error: "Unknown group" };
+      }
+      if (!next.groups[fromChatId].memberPeerIds.includes(actor)) {
+        return { ok: false, error: "Cannot read source chat" };
+      }
+      if (!next.groups[toChatId].memberPeerIds.includes(actor)) {
+        return { ok: false, error: "Not a member of target group" };
+      }
+      const src = (next.groupMessages[fromChatId] || []).find(
+        (m) => m.id === messageId,
+      );
+      if (!src || src.kind === "system") {
+        return { ok: false, error: "Unknown message" };
+      }
+      const fromName =
+        String(action.fromName || "").trim() ||
+        next.roster.find((r) => r.peerId === src.senderPeerId)?.displayName ||
+        "Someone";
+      const msg = buildForwardedMessage(src, {
+        chatId: toChatId,
+        senderPeerId: actor,
+        fromName,
+        fromPeerId: src.senderPeerId,
+        fromChatId,
+      });
+      next.groupMessages[toChatId] = [
+        ...(next.groupMessages[toChatId] || []),
+        msg,
+      ];
+      effects.push({ event: "message-added", chatId: toChatId, message: msg });
+      return { ok: true, state: next, effects };
+    }
+
     default:
       return { ok: false, error: `Unknown host action: ${action.type}` };
   }
@@ -509,7 +639,8 @@ export function applyHostEvent(state, body) {
       delete next.groupMessages[chatId];
       return next;
     }
-    case "message-edited": {
+    case "message-edited":
+    case "message-updated": {
       const msg = body.message;
       const chatId = body.chatId || msg?.chatId;
       if (!msg?.id || !chatId || !next.groupMessages[chatId]) return next;
@@ -526,6 +657,17 @@ export function applyHostEvent(state, body) {
       next.groupMessages[chatId] = next.groupMessages[chatId].map((m) =>
         m.id === messageId ? { ...m, delivery } : m,
       );
+      return next;
+    }
+    case "session-renamed": {
+      const title = String(body.title || "").trim();
+      if (title) next.session.title = title;
+      return next;
+    }
+    case "peer-kicked": {
+      const peerId = String(body.peerId || "").trim();
+      if (!peerId) return next;
+      next.roster = next.roster.filter((r) => r.peerId !== peerId);
       return next;
     }
     default:
@@ -926,6 +1068,84 @@ export function applyDm(dmState, selfPeerId, action, opts = {}) {
       return { ok: true, state: next, dmId };
     }
 
+    case "dm-reaction": {
+      const dmId = action.dmId || action.chatId;
+      const messageId = action.messageId;
+      const emoji = String(action.emoji || "").trim();
+      if (!dmId || !next.dms[dmId]) return { ok: false, error: "Unknown DM" };
+      if (!next.dms[dmId].memberPeerIds.includes(selfPeerId)) {
+        return { ok: false, error: "Not a DM participant" };
+      }
+      if (remote && !next.dms[dmId].memberPeerIds.includes(remote)) {
+        return { ok: false, error: "Sender not in DM" };
+      }
+      if (!messageId || !emoji || emoji.length > 8) {
+        return { ok: false, error: "Missing reaction" };
+      }
+      const actor = remote || selfPeerId;
+      const msgs = next.dmMessages[dmId] || [];
+      const idx = msgs.findIndex((m) => m.id === messageId);
+      if (idx < 0) return { ok: false, error: "Unknown message" };
+      const msg = msgs[idx];
+      if (msg.kind === "system") {
+        return { ok: false, error: "Cannot react to system message" };
+      }
+      const updated = {
+        ...msg,
+        reactions: toggleReaction(msg.reactions, emoji, actor),
+      };
+      next.dmMessages[dmId] = [
+        ...msgs.slice(0, idx),
+        updated,
+        ...msgs.slice(idx + 1),
+      ];
+      return { ok: true, state: next, message: updated, dmId };
+    }
+
+    case "dm-forward": {
+      const dmId = action.dmId || action.chatId;
+      if (!dmId) return { ok: false, error: "Unknown DM" };
+      if (!next.dms[dmId]) {
+        if (!remote) return { ok: false, error: "Unknown DM" };
+        const open = applyDm(
+          next,
+          selfPeerId,
+          { type: "dm-open", peerId: remote },
+          { remoteSenderPeerId: remote },
+        );
+        if (!open.ok) return open;
+        Object.assign(next, open.state);
+      }
+      const chat = next.dms[dmId];
+      if (!chat.memberPeerIds.includes(selfPeerId)) {
+        return { ok: false, error: "Not a DM participant" };
+      }
+      if (remote && !chat.memberPeerIds.includes(remote)) {
+        return { ok: false, error: "Sender not in DM" };
+      }
+      const senderPeerId = remote || selfPeerId;
+      /** @type {Message | undefined} */
+      let msg = action.message;
+      if (!msg || typeof msg !== "object") {
+        return { ok: false, error: "Missing forwarded message" };
+      }
+      msg = {
+        ...msg,
+        id: msg.id || mintId("m"),
+        chatId: dmId,
+        senderPeerId,
+        createdAt: msg.createdAt || Date.now(),
+        delivery: msg.delivery || { ackedBy: [] },
+        forward: normalizeForward(msg.forward || action.forward),
+      };
+      const list = next.dmMessages[dmId] || [];
+      if (list.some((m) => m.id === msg.id)) {
+        return { ok: true, state: next, message: msg, dmId };
+      }
+      next.dmMessages[dmId] = [...list, msg];
+      return { ok: true, state: next, message: msg, dmId };
+    }
+
     default:
       return { ok: false, error: `Unknown DM action: ${action.type}` };
   }
@@ -1066,6 +1286,22 @@ function previewText(last) {
       ? last.text
       : last.mediaInfo?.[0]?.fileName || "File";
   }
+  if (last.forward) {
+    const body =
+      last.kind === "sticker"
+        ? "Sticker"
+        : last.text?.trim() ||
+          (last.kind === "media" || last.kind === "album"
+            ? "Photo"
+            : last.kind === "video"
+              ? "Video"
+              : last.kind === "audio"
+                ? "Audio"
+                : last.kind === "file"
+                  ? "File"
+                  : "Message");
+    return `Fwd: ${body}`;
+  }
   if (last.kind === "media") {
     return last.text?.trim() ? last.text : "Photo";
   }
@@ -1123,6 +1359,81 @@ function normalizeMediaInfo(raw, len) {
     });
   }
   return out.length ? out : undefined;
+}
+
+/**
+ * @param {{ emoji: string, peerIds: string[] }[] | undefined} reactions
+ * @param {string} emoji
+ * @param {string} peerId
+ * @returns {{ emoji: string, peerIds: string[] }[]}
+ */
+function toggleReaction(reactions, emoji, peerId) {
+  /** @type {{ emoji: string, peerIds: string[] }[]} */
+  const list = (reactions || []).map((r) => ({
+    emoji: r.emoji,
+    peerIds: [...(r.peerIds || [])],
+  }));
+  const idx = list.findIndex((r) => r.emoji === emoji);
+  if (idx < 0) {
+    list.push({ emoji, peerIds: [peerId] });
+    return list;
+  }
+  const peers = list[idx].peerIds;
+  if (peers.includes(peerId)) {
+    const next = peers.filter((p) => p !== peerId);
+    if (!next.length) list.splice(idx, 1);
+    else list[idx] = { emoji, peerIds: next };
+  } else {
+    list[idx] = { emoji, peerIds: [...peers, peerId] };
+  }
+  return list;
+}
+
+/**
+ * @param {unknown} raw
+ * @returns {{ fromName: string, fromPeerId?: string, originalId?: string, fromChatId?: string } | undefined}
+ */
+function normalizeForward(raw) {
+  if (!raw || typeof raw !== "object") return undefined;
+  const o = /** @type {Record<string, unknown>} */ (raw);
+  const fromName = String(o.fromName || "").trim();
+  if (!fromName) return undefined;
+  return {
+    fromName: fromName.slice(0, 80),
+    fromPeerId: o.fromPeerId ? String(o.fromPeerId) : undefined,
+    originalId: o.originalId ? String(o.originalId) : undefined,
+    fromChatId: o.fromChatId ? String(o.fromChatId) : undefined,
+  };
+}
+
+/**
+ * @param {Message} src
+ * @param {{ chatId: string, senderPeerId: string, fromName: string, fromPeerId?: string, fromChatId?: string }} ctx
+ * @returns {Message}
+ */
+export function buildForwardedMessage(src, ctx) {
+  const forward = normalizeForward({
+    fromName: ctx.fromName,
+    fromPeerId: ctx.fromPeerId,
+    originalId: src.id,
+    fromChatId: ctx.fromChatId,
+  });
+  /** @type {Message} */
+  const msg = {
+    id: mintId("m"),
+    chatId: ctx.chatId,
+    senderPeerId: ctx.senderPeerId,
+    createdAt: Date.now(),
+    kind: src.kind,
+    text: src.text,
+    entities: src.entities,
+    sticker: src.sticker,
+    mediaIds: src.mediaIds ? [...src.mediaIds] : undefined,
+    mediaInfo: src.mediaInfo ? clone(src.mediaInfo) : undefined,
+    forward,
+    delivery: { ackedBy: [] },
+  };
+  return msg;
 }
 
 /**

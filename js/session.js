@@ -282,6 +282,16 @@ export class ChatSession {
       this.hostState = result.state;
       this._emitEffects(result.effects, /* skipSelf */ true);
       this._ackFromEffects(result.effects);
+      if (action.type === "admin-kick" && action.peerId) {
+        this._broadcastRoster();
+        this._send(
+          encodeFrame("peer-kicked", {
+            peerId: action.peerId,
+            reason: "kicked",
+          }),
+          action.peerId,
+        );
+      }
       if (this.hostState.session.ended) {
         this.ended = true;
         this._send(encodeFrame("session-ended", { reason: "ended" }));
@@ -768,7 +778,8 @@ export class ChatSession {
         size: Number(info?.size) || prev.size || 0,
         mime: info?.mime || prev.mime,
         duration: info?.duration ?? prev.duration,
-        senderPeerId: message.senderPeerId || prev.senderPeerId,
+        // Keep original uploader when a forward re-announces the same mediaId.
+        senderPeerId: prev.senderPeerId || message.senderPeerId,
         thumbDataUrl: info?.thumbDataUrl || prev.thumbDataUrl,
       });
     });
@@ -788,6 +799,104 @@ export class ChatSession {
       text,
       entities,
     });
+  }
+
+  /**
+   * @param {string} chatId
+   * @param {string} messageId
+   * @param {string} emoji
+   */
+  setGroupReaction(chatId, messageId, emoji) {
+    this.dispatchHostAction({
+      type: "set-reaction",
+      chatId,
+      messageId,
+      emoji,
+    });
+  }
+
+  /**
+   * @param {string} dmId
+   * @param {string} messageId
+   * @param {string} emoji
+   */
+  setDmReaction(dmId, messageId, emoji) {
+    const r = applyDm(this.dmState, this.selfPeerId, {
+      type: "dm-reaction",
+      dmId,
+      messageId,
+      emoji,
+    });
+    if (!r.ok) {
+      this.hooks.onError(r.error || "Reaction failed");
+      return;
+    }
+    this.dmState = r.state;
+    const other = this._dmOther(dmId);
+    if (other) {
+      this._send(
+        encodeFrame("dm-reaction", { dmId, messageId, emoji }),
+        other,
+      );
+    }
+    this.hooks.onChange();
+  }
+
+  /**
+   * Group → group forward via host.
+   * @param {string} fromChatId
+   * @param {string} messageId
+   * @param {string} toChatId
+   * @param {string} [fromName]
+   */
+  forwardGroupMessage(fromChatId, messageId, toChatId, fromName) {
+    this.dispatchHostAction({
+      type: "forward-message",
+      fromChatId,
+      messageId,
+      toChatId,
+      fromName,
+    });
+  }
+
+  /**
+   * Send a pre-built forwarded message into a DM (targeted).
+   * @param {string} dmId
+   * @param {import("./engine.js").Message} message
+   */
+  forwardToDm(dmId, message) {
+    const r = applyDm(this.dmState, this.selfPeerId, {
+      type: "dm-forward",
+      dmId,
+      message,
+    });
+    if (!r.ok || !r.message) {
+      this.hooks.onError(r.error || "Forward failed");
+      return;
+    }
+    this.dmState = r.state;
+    const other = this._dmOther(dmId);
+    if (other) {
+      this._send(
+        encodeFrame("dm-forward", { dmId, message: r.message }),
+        other,
+      );
+    }
+    this.hooks.onChange();
+  }
+
+  /** @param {string} title */
+  renameSession(title) {
+    this.dispatchHostAction({ type: "admin-rename-session", title });
+  }
+
+  /** @param {string} peerId */
+  kickPeer(peerId) {
+    this.dispatchHostAction({ type: "admin-kick", peerId });
+  }
+
+  endSession() {
+    this.dispatchHostAction({ type: "admin-end-session" });
   }
 
   /**
@@ -1062,6 +1171,16 @@ export class ChatSession {
       this.hostState = result.state;
       this._emitEffects(result.effects, false);
       this._ackFromEffects(result.effects);
+      if (action.type === "admin-kick" && action.peerId) {
+        this._broadcastRoster();
+        this._send(
+          encodeFrame("peer-kicked", {
+            peerId: action.peerId,
+            reason: "kicked",
+          }),
+          action.peerId,
+        );
+      }
       if (this.hostState.session.ended) {
         this.ended = true;
         this._send(encodeFrame("session-ended", { reason: "ended" }));
@@ -1077,7 +1196,9 @@ export class ChatSession {
       type === "dm-send-media" ||
       type === "dm-edit" ||
       type === "dm-ack" ||
-      type === "dm-delete"
+      type === "dm-delete" ||
+      type === "dm-reaction" ||
+      type === "dm-forward"
     ) {
       this._onDmFrame(type, body, peerId);
     }
@@ -1175,6 +1296,22 @@ export class ChatSession {
       return;
     }
 
+    if (type === "peer-kicked") {
+      const kicked = String(body.peerId || "").trim();
+      if (kicked === this.selfPeerId) {
+        this._stopHelloRetry();
+        this._endSessionLocal("You were removed from the session");
+        this.hooks.onError("You were removed from the session");
+      } else if (this.hostState) {
+        this.hostState = {
+          ...this.hostState,
+          roster: this.hostState.roster.filter((r) => r.peerId !== kicked),
+        };
+        this.hooks.onChange();
+      }
+      return;
+    }
+
     if (
       type === "dm-open" ||
       type === "dm-send-text" ||
@@ -1182,7 +1319,9 @@ export class ChatSession {
       type === "dm-send-media" ||
       type === "dm-edit" ||
       type === "dm-ack" ||
-      type === "dm-delete"
+      type === "dm-delete" ||
+      type === "dm-reaction" ||
+      type === "dm-forward"
     ) {
       this._onDmFrame(type, body, peerId);
     }
@@ -1368,6 +1507,66 @@ export class ChatSession {
         this.dmState = r.state;
         this.hooks.onChange();
       }
+      return;
+    }
+
+    if (type === "dm-reaction") {
+      const r = applyDm(
+        this.dmState,
+        this.selfPeerId,
+        {
+          type: "dm-reaction",
+          dmId,
+          messageId: body.messageId,
+          emoji: body.emoji,
+        },
+        { remoteSenderPeerId: peerId },
+      );
+      if (r.ok) {
+        this.dmState = r.state;
+        this.hooks.onChange();
+      }
+      return;
+    }
+
+    if (type === "dm-forward") {
+      const r = applyDm(
+        this.dmState,
+        this.selfPeerId,
+        {
+          type: "dm-forward",
+          dmId,
+          message: body.message,
+        },
+        { remoteSenderPeerId: peerId },
+      );
+      if (r.ok) {
+        this.dmState = r.state;
+        if (r.message) {
+          this.rememberMediaInfo(r.message);
+          if (r.message.mediaIds?.length) {
+            const sizes = Object.create(null);
+            const mimes = Object.create(null);
+            const senders = Object.create(null);
+            r.message.mediaIds.forEach((id, i) => {
+              const sz = r.message.mediaInfo?.[i]?.size;
+              if (sz != null) sizes[id] = sz;
+              const mime = r.message.mediaInfo?.[i]?.mime;
+              if (mime) mimes[id] = mime;
+              if (r.message.senderPeerId) senders[id] = r.message.senderPeerId;
+              // Prefer original media sender from forward meta if present in local store
+              const meta = this._mediaMeta.get(id);
+              if (meta?.senderPeerId) senders[id] = meta.senderPeerId;
+            });
+            this.ensureMedia(r.message.mediaIds, { sizes, mimes, senders });
+          }
+          this._send(
+            encodeFrame("dm-ack", { dmId, messageIds: [r.message.id] }),
+            peerId,
+          );
+        }
+        this.hooks.onChange();
+      }
     }
   }
 
@@ -1463,12 +1662,22 @@ export class ChatSession {
     const hostId = getHostPeerId(this.hostState);
     for (const effect of effects) {
       if (effect.event === "session-ended") continue;
+      // peer-kicked is sent as a dedicated frame to the kickee; roster broadcast separate.
+      if (effect.event === "peer-kicked") {
+        const wireTargets = [...this.connectedPeers].filter(
+          (id) => id && id !== this.selfPeerId && id !== effect.peerId,
+        );
+        this._sendToPeers(encodeFrame("event", effect), wireTargets);
+        continue;
+      }
 
       let targets = [];
       if (effect.event === "chat-deleted" && effect.memberPeerIds) {
         targets = [...effect.memberPeerIds];
       } else if (effect.event === "chat-created" && effect.chat) {
         targets = [...effect.chat.memberPeerIds];
+      } else if (effect.event === "session-renamed") {
+        targets = [...this.connectedPeers];
       } else if (effect.chatId && this.hostState.groups[effect.chatId]) {
         targets = fanoutPeerIdsForGroup(this.hostState, effect.chatId);
       } else {

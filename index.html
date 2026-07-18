@@ -38,7 +38,7 @@
       <aside class="sidebar">
         <div class="sidebar__top">
           <span class="sidebar__badge" id="mode-badge">Online</span>
-          <span class="sidebar__title" id="session-label">Session</span>
+          <button type="button" class="sidebar__title" id="session-label" title="Session">Session</button>
         </div>
         <div class="sidebar__status" id="conn-status">Connecting…</div>
         <div class="sidebar__invite" id="invite-box" hidden>
@@ -53,7 +53,10 @@
         <div class="sidebar__actions">
           <button type="button" class="btn btn--small" id="btn-new-dm">New DM</button>
           <button type="button" class="btn btn--small" id="btn-new-group">New group</button>
+          <button type="button" class="btn btn--small" id="btn-admin" hidden>Admin</button>
+          <button type="button" class="btn btn--small btn--danger" id="btn-end-session" hidden>End session</button>
         </div>
+        <p class="sidebar__hint" id="roster-hint" hidden>Waiting for people to join…</p>
         <ul class="chat-list" id="chat-list"></ul>
       </aside>
 

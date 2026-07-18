@@ -7,21 +7,45 @@ import {
 } from "../media.js";
 import { stickerFileUrl } from "../stickers.js";
 
+export const REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🔥"];
+
 /**
  * @param {HTMLElement} root
  * @param {Array<{ id: string, kind: string, title: string, preview: string, updatedAt: number }>} chats
  * @param {string | null} activeId
  * @param {Record<string, number>} unread
  * @param {(id: string) => void} onSelect
+ * @param {{
+ *   pinnedIds?: string[],
+ *   mutedIds?: string[],
+ *   onTogglePin?: (chatId: string) => void,
+ *   onToggleMute?: (chatId: string) => void,
+ *   emptyHint?: string,
+ * }} [opts]
  */
-export function renderChatList(root, chats, activeId, unread, onSelect) {
+export function renderChatList(root, chats, activeId, unread, onSelect, opts = {}) {
   root.innerHTML = "";
+  const pinned = new Set(opts.pinnedIds || []);
+  const muted = new Set(opts.mutedIds || []);
+
+  if (!chats.length) {
+    const empty = document.createElement("li");
+    empty.className = "chat-list__empty";
+    empty.textContent =
+      opts.emptyHint || "Share the invite to start chatting";
+    root.append(empty);
+    return;
+  }
+
   for (const chat of chats) {
     const li = document.createElement("li");
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className =
-      "chat-list__item" + (chat.id === activeId ? " is-active" : "");
+      "chat-list__item" +
+      (chat.id === activeId ? " is-active" : "") +
+      (pinned.has(chat.id) ? " is-pinned" : "") +
+      (muted.has(chat.id) ? " is-muted" : "");
     btn.addEventListener("click", () => onSelect(chat.id));
 
     const av = document.createElement("div");
@@ -37,7 +61,9 @@ export function renderChatList(root, chats, activeId, unread, onSelect) {
       </div>
       <div class="chat-list__preview"></div>
     `;
-    main.querySelector(".chat-list__name").textContent = chat.title;
+    const nameEl = main.querySelector(".chat-list__name");
+    nameEl.textContent =
+      (pinned.has(chat.id) ? "📌 " : "") + chat.title;
     main.querySelector(".chat-list__time").textContent = formatTime(chat.updatedAt);
     main.querySelector(".chat-list__preview").textContent = chat.preview;
 
@@ -45,9 +71,11 @@ export function renderChatList(root, chats, activeId, unread, onSelect) {
     right.className = "chat-list__right";
     const kind = document.createElement("div");
     kind.className = "chat-list__kind";
-    kind.textContent = chat.kind === "dm" ? "DM" : "Group";
+    kind.textContent =
+      (muted.has(chat.id) ? "🔇 " : "") +
+      (chat.kind === "dm" ? "DM" : "Group");
     right.append(kind);
-    const count = unread[chat.id] || 0;
+    const count = muted.has(chat.id) ? 0 : unread[chat.id] || 0;
     if (count > 0) {
       const badge = document.createElement("span");
       badge.className = "unread-badge";
@@ -55,8 +83,34 @@ export function renderChatList(root, chats, activeId, unread, onSelect) {
       right.append(badge);
     }
 
+    const menu = document.createElement("div");
+    menu.className = "chat-list__menu";
+    if (typeof opts.onTogglePin === "function") {
+      const pinBtn = document.createElement("button");
+      pinBtn.type = "button";
+      pinBtn.className = "btn btn--tiny";
+      pinBtn.textContent = pinned.has(chat.id) ? "Unpin" : "Pin";
+      pinBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        opts.onTogglePin(chat.id);
+      });
+      menu.append(pinBtn);
+    }
+    if (typeof opts.onToggleMute === "function") {
+      const muteBtn = document.createElement("button");
+      muteBtn.type = "button";
+      muteBtn.className = "btn btn--tiny";
+      muteBtn.textContent = muted.has(chat.id) ? "Unmute" : "Mute";
+      muteBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        opts.onToggleMute(chat.id);
+      });
+      menu.append(muteBtn);
+    }
+
     btn.append(av, main, right);
     li.append(btn);
+    if (menu.childNodes.length) li.append(menu);
     root.append(li);
   }
 }
@@ -75,6 +129,9 @@ export function renderChatList(root, chats, activeId, unread, onSelect) {
  *   onDeleteMessage?: (messageId: string) => void,
  *   onReply?: (messageId: string) => void,
  *   onEdit?: (messageId: string) => void,
+ *   onReact?: (messageId: string, emoji: string) => void,
+ *   onForward?: (messageId: string) => void,
+ *   onBack?: () => void,
  *   getMediaUrl?: (mediaId: string) => string | null,
  *   getPlayableMediaUrl?: (mediaId: string, gate?: object) => string | null,
  *   getMediaMime?: (mediaId: string) => string | null,
@@ -124,6 +181,7 @@ export function renderThread(
 
   headerEl.innerHTML = `
     <div class="chat-header__left">
+      <button type="button" class="btn btn--small chat-header__back" id="chat-back" aria-label="Back to chats" hidden>←</button>
       <div class="avatar avatar--g${hashHue(chat.id)}" style="width:42px;height:42px;font-size:15px"></div>
       <div class="chat-header__meta">
         <h1 class="chat-header__title"></h1>
@@ -135,6 +193,12 @@ export function renderThread(
   headerEl.querySelector(".avatar").textContent = initials(title);
   headerEl.querySelector(".chat-header__title").textContent = title;
   headerEl.querySelector(".chat-header__sub").textContent = sub;
+
+  const backBtn = headerEl.querySelector("#chat-back");
+  if (backBtn && typeof opts.onBack === "function") {
+    backBtn.hidden = false;
+    backBtn.addEventListener("click", () => opts.onBack());
+  }
 
   const actions = headerEl.querySelector(".chat-header__actions");
   if (
@@ -184,6 +248,13 @@ export function renderThread(
       name.className = `bubble__name bubble__name--c${ci % 5}`;
       name.textContent = sender?.displayName || msg.senderPeerId;
       bubble.append(name);
+    }
+
+    if (msg.forward) {
+      const fwd = document.createElement("div");
+      fwd.className = "bubble__forward";
+      fwd.textContent = `Forwarded from ${msg.forward.fromName || "Someone"}`;
+      bubble.append(fwd);
     }
 
     if (msg.replyTo) {
@@ -494,6 +565,26 @@ export function renderThread(
     }
     bubble.append(meta);
 
+    if (msg.reactions?.length) {
+      const rowReact = document.createElement("div");
+      rowReact.className = "bubble__reactions";
+      for (const r of msg.reactions) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className =
+          "reaction-chip" +
+          (r.peerIds?.includes(selfPeerId) ? " is-mine" : "");
+        chip.textContent = `${r.emoji} ${r.peerIds?.length || 0}`;
+        chip.disabled = Boolean(opts.sessionEnded) || !opts.onReact;
+        chip.addEventListener("click", (e) => {
+          e.stopPropagation();
+          opts.onReact?.(msg.id, r.emoji);
+        });
+        rowReact.append(chip);
+      }
+      bubble.append(rowReact);
+    }
+
     const toolbar = document.createElement("div");
     toolbar.className = "bubble__toolbar";
     if (!opts.sessionEnded && typeof opts.onReply === "function") {
@@ -506,6 +597,42 @@ export function renderThread(
         opts.onReply(msg.id);
       });
       toolbar.append(replyBtn);
+    }
+    if (!opts.sessionEnded && typeof opts.onReact === "function") {
+      const reactBtn = document.createElement("button");
+      reactBtn.type = "button";
+      reactBtn.className = "btn btn--tiny";
+      reactBtn.textContent = "React";
+      reactBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const picker = document.createElement("div");
+        picker.className = "reaction-picker";
+        for (const emoji of REACTION_EMOJIS) {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.className = "reaction-picker__btn";
+          b.textContent = emoji;
+          b.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            picker.remove();
+            opts.onReact(msg.id, emoji);
+          });
+          picker.append(b);
+        }
+        toolbar.append(picker);
+      });
+      toolbar.append(reactBtn);
+    }
+    if (!opts.sessionEnded && typeof opts.onForward === "function") {
+      const fwdBtn = document.createElement("button");
+      fwdBtn.type = "button";
+      fwdBtn.className = "btn btn--tiny";
+      fwdBtn.textContent = "Forward";
+      fwdBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        opts.onForward(msg.id);
+      });
+      toolbar.append(fwdBtn);
     }
     if (
       !opts.sessionEnded &&

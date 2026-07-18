@@ -2,6 +2,7 @@ import {
   applyDm,
   applyHost,
   assertHostExcludesDms,
+  buildForwardedMessage,
   findMessage,
   getChatThread,
   isHostPeer,
@@ -24,6 +25,12 @@ import {
   prepareFile,
   prepareVideo,
 } from "../media.js";
+import {
+  isMuted,
+  loadPrefs,
+  toggleMuted,
+  togglePinned,
+} from "../prefs.js";
 import { selfCheckEnvelope } from "../protocol.js";
 import { ChatSession } from "../session.js";
 import { ensureFixturePacks } from "../stickers.js";
@@ -54,6 +61,9 @@ const els = {
   inviteCopy: document.querySelector("#invite-copy"),
   btnNewDm: document.querySelector("#btn-new-dm"),
   btnNewGroup: document.querySelector("#btn-new-group"),
+  btnAdmin: document.querySelector("#btn-admin"),
+  btnEndSession: document.querySelector("#btn-end-session"),
+  rosterHint: document.querySelector("#roster-hint"),
   modal: document.querySelector("#modal"),
   modalTitle: document.querySelector("#modal-title"),
   modalBody: document.querySelector("#modal-body"),
@@ -104,7 +114,7 @@ log("boot", {
   href: location.href,
   joinId,
   fixture: isFixtureMode(),
-  build: "phase6-files",
+  build: "phase7-polish",
 });
 
 const picker = createPicker(els.picker, {
@@ -138,13 +148,20 @@ function showBanner(text, ok) {
   }
 }
 
+function currentSessionId() {
+  const store = getStore();
+  return store?.hostState?.session?.id || "";
+}
+
 function trackUnread(store) {
+  const sid = store.hostState?.session?.id || "";
   const chats = listChatsForUi(
     store.hostState,
     store.dmState,
     store.selfPeerId,
   );
   for (const chat of chats) {
+    if (sid && isMuted(sid, chat.id)) continue;
     const thread = getChatThread(store.hostState, store.dmState, chat.id);
     if (!thread) continue;
     let seen = seenMessageIds.get(chat.id);
@@ -279,28 +296,57 @@ function paint() {
       ? session?.role === "host"
       : isHostPeer(store.hostState, store.selfPeerId);
 
-  const chats = listChatsForUi(
+  const sid = store.hostState?.session?.id || "";
+  const prefs = loadPrefs(sid);
+  let chats = listChatsForUi(
     store.hostState,
     store.dmState,
     store.selfPeerId,
   );
+  chats = [...chats].sort((a, b) => {
+    const ap = prefs.pinnedChatIds.includes(a.id) ? 1 : 0;
+    const bp = prefs.pinnedChatIds.includes(b.id) ? 1 : 0;
+    if (ap !== bp) return bp - ap;
+    return b.updatedAt - a.updatedAt;
+  });
   if (activeChatId && !chats.some((c) => c.id === activeChatId)) {
     activeChatId = null;
     clearReply();
     clearEdit();
   }
-  if (!activeChatId && chats.length) {
-    activeChatId = chats[0].id;
-    unread[activeChatId] = 0;
+
+  if (els.app) {
+    els.app.classList.toggle("app--chat-open", Boolean(activeChatId));
   }
 
-  renderChatList(els.chatList, chats, activeChatId, unread, (id) => {
-    activeChatId = id;
-    unread[id] = 0;
-    clearReply();
-    clearEdit();
-    paint();
-  });
+  renderChatList(
+    els.chatList,
+    chats,
+    activeChatId,
+    unread,
+    (id) => {
+      activeChatId = id;
+      unread[id] = 0;
+      clearReply();
+      clearEdit();
+      paint();
+    },
+    {
+      pinnedIds: prefs.pinnedChatIds,
+      mutedIds: prefs.mutedChatIds,
+      emptyHint: store.hostState.roster.length
+        ? "No chats yet — start a DM or group"
+        : "Share the invite so people can join",
+      onTogglePin: (chatId) => {
+        togglePinned(sid, chatId);
+        paint();
+      },
+      onToggleMute: (chatId) => {
+        toggleMuted(sid, chatId);
+        paint();
+      },
+    },
+  );
 
   const thread = activeChatId
     ? getChatThread(store.hostState, store.dmState, activeChatId)
@@ -372,6 +418,14 @@ function paint() {
       },
       onReply: (messageId) => setReply(messageId),
       onEdit: (messageId) => setEdit(messageId),
+      onReact: (messageId, emoji) => reactToMessage(messageId, emoji),
+      onForward: (messageId) => openForwardModal(messageId),
+      onBack: () => {
+        activeChatId = null;
+        clearReply();
+        clearEdit();
+        paint();
+      },
       getMediaUrl: (mediaId) => resolveMediaUrl(mediaId),
       getPlayableMediaUrl: (mediaId, gate) =>
         resolvePlayableMediaUrl(mediaId, gate),
@@ -451,13 +505,304 @@ function paint() {
   els.composeInput.disabled = !canSend;
   els.composeSend.disabled = !canSend;
   if (els.attachBtn) els.attachBtn.disabled = !canSend;
-  els.btnNewDm.disabled = ended || !store.hostState.roster.length;
-  els.btnNewGroup.disabled = ended || store.hostState.roster.length < 2;
+  const rosterOthers = store.hostState.roster.filter(
+    (r) => r.peerId !== store.selfPeerId,
+  );
+  els.btnNewDm.disabled = ended || !rosterOthers.length;
+  els.btnNewGroup.disabled = ended || rosterOthers.length < 1;
+  if (els.rosterHint) {
+    els.rosterHint.hidden = ended || rosterOthers.length > 0 || !asHost;
+  }
+  if (els.btnAdmin) {
+    els.btnAdmin.hidden = !asHost || ended || mode === "fixture";
+  }
+  if (els.btnEndSession) {
+    els.btnEndSession.hidden = !asHost || ended;
+  }
 
   if (els.sessionLabel) {
     els.sessionLabel.textContent = store.hostState.session.title || "Session";
+    els.sessionLabel.classList.toggle("is-editable", asHost && !ended);
+    els.sessionLabel.title = asHost && !ended ? "Rename session" : "Session";
   }
   updateJumpFab();
+}
+
+function reactToMessage(messageId, emoji) {
+  const store = getStore();
+  if (!store || !activeChatId) return;
+  const thread = getChatThread(
+    store.hostState,
+    store.dmState,
+    activeChatId,
+  );
+  if (!thread) return;
+  if (mode === "online" && session) {
+    if (thread.kind === "group") {
+      session.setGroupReaction(activeChatId, messageId, emoji);
+    } else {
+      session.setDmReaction(activeChatId, messageId, emoji);
+    }
+  } else if (mode === "fixture" && fixtureStore) {
+    if (thread.kind === "group") {
+      const r = applyHost(
+        fixtureStore.hostState,
+        {
+          type: "set-reaction",
+          chatId: activeChatId,
+          messageId,
+          emoji,
+        },
+        { actorPeerId: fixtureStore.selfPeerId },
+      );
+      if (r.ok) fixtureStore = { ...fixtureStore, hostState: r.state };
+    } else {
+      const r = applyDm(fixtureStore.dmState, fixtureStore.selfPeerId, {
+        type: "dm-reaction",
+        dmId: activeChatId,
+        messageId,
+        emoji,
+      });
+      if (r.ok) fixtureStore = { ...fixtureStore, dmState: r.state };
+    }
+    paint();
+  }
+}
+
+function openForwardModal(messageId) {
+  const store = getStore();
+  if (!store || !activeChatId) return;
+  const src = findMessage(
+    store.hostState,
+    store.dmState,
+    activeChatId,
+    messageId,
+  );
+  if (!src || src.kind === "system") return;
+  const fromChatId = activeChatId;
+  const chats = listChatsForUi(
+    store.hostState,
+    store.dmState,
+    store.selfPeerId,
+  ).filter((c) => c.id !== fromChatId);
+
+  openModal(
+    "Forward to…",
+    (body) => {
+      if (!chats.length) {
+        body.textContent = "No other chats to forward to.";
+        return;
+      }
+      const list = document.createElement("div");
+      list.className = "modal__list";
+      for (const c of chats) {
+        const label = document.createElement("label");
+        label.className = "modal__check";
+        label.innerHTML = `<input type="radio" name="fwd-target" value="${c.id}" data-kind="${c.kind}" /> <span></span>`;
+        label.querySelector("span").textContent = `${c.title} (${c.kind})`;
+        list.append(label);
+      }
+      body.append(list);
+    },
+    () => {
+      const picked = els.modalBody.querySelector(
+        'input[name="fwd-target"]:checked',
+      );
+      if (!picked) return;
+      const toChatId = picked.value;
+      const toKind = picked.getAttribute("data-kind");
+      closeModal();
+      doForward(src, fromChatId, toChatId, toKind);
+    },
+    "Forward",
+  );
+}
+
+/**
+ * @param {import("../engine.js").Message} src
+ * @param {string} fromChatId
+ * @param {string} toChatId
+ * @param {string} toKind
+ */
+function doForward(src, fromChatId, toChatId, toKind) {
+  const store = getStore();
+  if (!store) return;
+  const fromName =
+    store.hostState.roster.find((r) => r.peerId === src.senderPeerId)
+      ?.displayName || "Someone";
+  const fromThread = getChatThread(
+    store.hostState,
+    store.dmState,
+    fromChatId,
+  );
+
+  if (
+    mode === "online" &&
+    session &&
+    fromThread?.kind === "group" &&
+    toKind === "group"
+  ) {
+    session.forwardGroupMessage(fromChatId, src.id, toChatId, fromName);
+    return;
+  }
+
+  const msg = buildForwardedMessage(src, {
+    chatId: toChatId,
+    senderPeerId: store.selfPeerId,
+    fromName,
+    fromPeerId: src.senderPeerId,
+    fromChatId,
+  });
+
+  if (mode === "online" && session) {
+    if (toKind === "dm") {
+      session.forwardToDm(toChatId, msg);
+    } else if (msg.kind === "sticker" && msg.sticker) {
+      session.dispatchHostAction({
+        type: "send-sticker",
+        chatId: toChatId,
+        pack: msg.sticker.pack,
+        stickerId: msg.sticker.stickerId,
+        forward: msg.forward,
+      });
+    } else if (msg.mediaIds?.length) {
+      session.dispatchHostAction({
+        type: "send-media",
+        chatId: toChatId,
+        mediaIds: msg.mediaIds,
+        mediaInfo: msg.mediaInfo,
+        mediaKind:
+          msg.kind === "video" ||
+          msg.kind === "audio" ||
+          msg.kind === "file"
+            ? msg.kind
+            : undefined,
+        text: msg.text,
+        entities: msg.entities,
+        forward: msg.forward,
+      });
+    } else {
+      session.dispatchHostAction({
+        type: "send-text",
+        chatId: toChatId,
+        text: msg.text || "(forwarded)",
+        entities: msg.entities,
+        forward: msg.forward,
+      });
+    }
+    return;
+  }
+
+  if (mode === "fixture" && fixtureStore) {
+    if (toKind === "group" && fromThread?.kind === "group") {
+      const r = applyHost(
+        fixtureStore.hostState,
+        {
+          type: "forward-message",
+          fromChatId,
+          messageId: src.id,
+          toChatId,
+          fromName,
+        },
+        { actorPeerId: fixtureStore.selfPeerId },
+      );
+      if (r.ok) fixtureStore = { ...fixtureStore, hostState: r.state };
+    } else if (toKind === "dm") {
+      const r = applyDm(fixtureStore.dmState, fixtureStore.selfPeerId, {
+        type: "dm-forward",
+        dmId: toChatId,
+        message: msg,
+      });
+      if (r.ok) fixtureStore = { ...fixtureStore, dmState: r.state };
+    } else if (msg.kind === "text") {
+      const r = applyHost(
+        fixtureStore.hostState,
+        {
+          type: "send-text",
+          chatId: toChatId,
+          text: msg.text || "(forwarded)",
+          forward: msg.forward,
+        },
+        { actorPeerId: fixtureStore.selfPeerId },
+      );
+      if (r.ok) fixtureStore = { ...fixtureStore, hostState: r.state };
+    }
+    paint();
+  }
+}
+
+function openAdminModal() {
+  const store = getStore();
+  if (!store) return;
+  const others = store.hostState.roster.filter(
+    (r) => r.peerId !== store.selfPeerId,
+  );
+  openModal(
+    "Kick member",
+    (body) => {
+      if (!others.length) {
+        body.textContent = "No other members to kick.";
+        return;
+      }
+      const list = document.createElement("div");
+      list.className = "modal__list";
+      for (const r of others) {
+        const label = document.createElement("label");
+        label.className = "modal__check";
+        label.innerHTML = `<input type="radio" name="kick-peer" value="${r.peerId}" /> <span></span>`;
+        label.querySelector("span").textContent = r.displayName || r.peerId;
+        list.append(label);
+      }
+      body.append(list);
+    },
+    () => {
+      const picked = els.modalBody.querySelector(
+        'input[name="kick-peer"]:checked',
+      );
+      if (!picked) return;
+      const peerId = picked.value;
+      closeModal();
+      if (!confirm(`Remove ${peerId} from the session?`)) return;
+      if (mode === "online" && session) session.kickPeer(peerId);
+      else if (mode === "fixture" && fixtureStore) {
+        const r = applyHost(
+          fixtureStore.hostState,
+          { type: "admin-kick", peerId },
+          { actorPeerId: fixtureStore.selfPeerId },
+        );
+        if (r.ok) fixtureStore = { ...fixtureStore, hostState: r.state };
+        paint();
+      }
+    },
+    "Kick",
+  );
+}
+
+function renameSessionPrompt() {
+  const store = getStore();
+  if (!store) return;
+  const asHost =
+    mode === "online"
+      ? session?.role === "host"
+      : isHostPeer(store.hostState, store.selfPeerId);
+  if (!asHost) return;
+  const next = prompt(
+    "Session title",
+    store.hostState.session.title || "Session",
+  );
+  if (next == null) return;
+  const title = next.trim();
+  if (!title) return;
+  if (mode === "online" && session) session.renameSession(title);
+  else if (mode === "fixture" && fixtureStore) {
+    const r = applyHost(
+      fixtureStore.hostState,
+      { type: "admin-rename-session", title },
+      { actorPeerId: fixtureStore.selfPeerId },
+    );
+    if (r.ok) fixtureStore = { ...fixtureStore, hostState: r.state };
+    paint();
+  }
 }
 
 function enterAppShell({ badge, status, inviteUrl }) {
@@ -681,11 +1026,12 @@ function closeModal() {
   els.modalBody.innerHTML = "";
 }
 
-function openModal(title, bodyBuilder, onOk) {
+function openModal(title, bodyBuilder, onOk, okLabel = "OK") {
   els.modalTitle.textContent = title;
   els.modalBody.innerHTML = "";
   bodyBuilder(els.modalBody);
   modalConfirm = onOk;
+  if (els.modalOk) els.modalOk.textContent = okLabel;
   els.modal.hidden = false;
 }
 
@@ -725,6 +1071,7 @@ function openNewDmModal() {
       closeModal();
       paint();
     },
+    "Create",
   );
 }
 
@@ -774,6 +1121,7 @@ function openNewGroupModal() {
       closeModal();
       paint();
     },
+    "Create",
   );
 }
 
@@ -1328,6 +1676,21 @@ els.inviteCopy?.addEventListener("click", async () => {
 
 els.btnNewDm?.addEventListener("click", openNewDmModal);
 els.btnNewGroup?.addEventListener("click", openNewGroupModal);
+els.btnAdmin?.addEventListener("click", openAdminModal);
+els.btnEndSession?.addEventListener("click", () => {
+  if (!confirm("End the session for everyone?")) return;
+  if (mode === "online" && session) session.endSession();
+  else if (mode === "fixture" && fixtureStore) {
+    const r = applyHost(
+      fixtureStore.hostState,
+      { type: "admin-end-session" },
+      { actorPeerId: fixtureStore.selfPeerId },
+    );
+    if (r.ok) fixtureStore = { ...fixtureStore, hostState: r.state };
+    paint();
+  }
+});
+els.sessionLabel?.addEventListener("click", renameSessionPrompt);
 els.pickerToggle?.addEventListener("click", togglePicker);
 els.modalCancel?.addEventListener("click", closeModal);
 els.modalOk?.addEventListener("click", () => {
