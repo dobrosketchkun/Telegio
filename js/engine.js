@@ -261,9 +261,12 @@ export function applyHost(state, action, ctx) {
     case "send-media": {
       const chatId = action.chatId;
       const mediaIds = normalizeMediaIds(action.mediaIds);
+      const mediaInfo = normalizeMediaInfo(action.mediaInfo, mediaIds.length);
       const mediaKind = String(
         action.mediaKind || action.kindHint || "",
       ).toLowerCase();
+      const asVideo =
+        mediaKind === "video" || looksLikeVideoInfo(mediaInfo, mediaIds.length);
       if (!chatId || !next.groups[chatId]) {
         return { ok: false, error: "Unknown group" };
       }
@@ -274,7 +277,7 @@ export function applyHost(state, action, ctx) {
       if (!mediaIds.length) {
         return { ok: false, error: "Missing media" };
       }
-      if (mediaKind === "video") {
+      if (asVideo) {
         if (mediaIds.length !== 1) {
           return { ok: false, error: "Video must be a single clip" };
         }
@@ -283,12 +286,11 @@ export function applyHost(state, action, ctx) {
       }
       const caption = String(action.text ?? action.caption ?? "");
       const kind =
-        mediaKind === "video"
+        asVideo
           ? /** @type {const} */ ("video")
           : mediaIds.length === 1
             ? /** @type {const} */ ("media")
             : /** @type {const} */ ("album");
-      const mediaInfo = normalizeMediaInfo(action.mediaInfo, mediaIds.length);
       const msg = {
         id: mintId("m"),
         chatId,
@@ -728,6 +730,10 @@ export function applyDm(dmState, selfPeerId, action, opts = {}) {
       const mediaIds = normalizeMediaIds(
         action.mediaIds || action.message?.mediaIds,
       );
+      const mediaInfo = normalizeMediaInfo(
+        action.mediaInfo || action.message?.mediaInfo,
+        mediaIds.length,
+      );
       const mediaKind = String(
         action.mediaKind ||
           action.kindHint ||
@@ -735,7 +741,9 @@ export function applyDm(dmState, selfPeerId, action, opts = {}) {
           "",
       ).toLowerCase();
       const asVideo =
-        mediaKind === "video" || action.message?.kind === "video";
+        mediaKind === "video" ||
+        action.message?.kind === "video" ||
+        looksLikeVideoInfo(mediaInfo, mediaIds.length);
       if (!dmId) return { ok: false, error: "Unknown DM" };
       if (!mediaIds.length) return { ok: false, error: "Missing media" };
       if (asVideo) {
@@ -772,10 +780,6 @@ export function applyDm(dmState, selfPeerId, action, opts = {}) {
       );
       const kind = /** @type {"media" | "album" | "video"} */ (
         asVideo ? "video" : mediaIds.length === 1 ? "media" : "album"
-      );
-      const mediaInfo = normalizeMediaInfo(
-        action.mediaInfo || action.message?.mediaInfo,
-        mediaIds.length,
       );
       /** @type {Message} */
       const msg = action.message
@@ -1002,14 +1006,17 @@ function previewText(last) {
   if (!last) return "No messages yet";
   if (last.kind === "system") return last.text || "System";
   if (last.kind === "sticker") return "Sticker";
+  if (
+    last.kind === "video" ||
+    looksLikeVideoInfo(last.mediaInfo, last.mediaIds?.length || 0)
+  ) {
+    return last.text?.trim() ? last.text : "Video";
+  }
   if (last.kind === "media") {
     return last.text?.trim() ? last.text : "Photo";
   }
   if (last.kind === "album") {
     return last.text?.trim() ? last.text : "Album";
-  }
-  if (last.kind === "video") {
-    return last.text?.trim() ? last.text : "Video";
   }
   return last.text || "Message";
 }
@@ -1048,6 +1055,16 @@ function normalizeMediaInfo(raw, len) {
     });
   }
   return out.length ? out : undefined;
+}
+
+/**
+ * Infer video when mediaKind was dropped but mime says video/*.
+ * @param {{ mime?: string }[] | undefined} mediaInfo
+ * @param {number} count
+ */
+function looksLikeVideoInfo(mediaInfo, count) {
+  if (count !== 1 || !mediaInfo?.[0]?.mime) return false;
+  return String(mediaInfo[0].mime).toLowerCase().startsWith("video/");
 }
 
 /** @param {HostState} state @param {string} peerId */

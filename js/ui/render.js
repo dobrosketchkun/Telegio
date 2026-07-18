@@ -72,6 +72,7 @@ export function renderChatList(root, chats, activeId, unread, onSelect) {
  *   onReply?: (messageId: string) => void,
  *   onEdit?: (messageId: string) => void,
  *   getMediaUrl?: (mediaId: string) => string | null,
+ *   getMediaMime?: (mediaId: string) => string | null,
  *   onOpenMedia?: (url: string) => void,
  *   onDownloadMedia?: (mediaId: string) => void,
  * }} [opts]
@@ -221,7 +222,7 @@ export function renderThread(
       media.append(img);
       bubble.append(media);
       bubble.classList.add("bubble--sticker");
-    } else if (msg.kind === "video" && msg.mediaIds?.length) {
+    } else if (isVideoMessage(msg, opts) && msg.mediaIds?.length) {
       const wrap = document.createElement("div");
       wrap.className = "bubble__video";
       const mid = msg.mediaIds[0];
@@ -325,7 +326,8 @@ export function renderThread(
         msg.kind === "sticker" ||
         msg.kind === "media" ||
         msg.kind === "album" ||
-        msg.kind === "video")
+        msg.kind === "video" ||
+        isVideoMessage(msg, opts))
     ) {
       const checks = document.createElement("span");
       checks.className = "checks";
@@ -401,13 +403,32 @@ export function renderThread(
   }
 }
 
+/**
+ * Video bubble even when kind was wrongly stored as "media" (mime says video/*).
+ * @param {import("../engine.js").Message | undefined} msg
+ * @param {{ getMediaMime?: (mediaId: string) => string | null }} [opts]
+ */
+function isVideoMessage(msg, opts = {}) {
+  if (!msg?.mediaIds?.length) return false;
+  if (msg.kind === "video") return true;
+  if (msg.kind !== "media" || msg.mediaIds.length !== 1) return false;
+  const mid = msg.mediaIds[0];
+  const fromInfo = msg.mediaInfo?.[0]?.mime;
+  const fromStore =
+    typeof opts.getMediaMime === "function" ? opts.getMediaMime(mid) : null;
+  const mime = String(fromInfo || fromStore || "").toLowerCase();
+  return mime.startsWith("video/");
+}
+
 /** @param {import("../engine.js").Message | undefined} msg */
 function quotePreview(msg) {
   if (!msg) return "Original message";
   if (msg.kind === "sticker") return "Sticker";
+  if (msg.kind === "video" || isVideoMessage(msg)) {
+    return msg.text?.trim() || "Video";
+  }
   if (msg.kind === "media") return msg.text?.trim() || "Photo";
   if (msg.kind === "album") return msg.text?.trim() || "Album";
-  if (msg.kind === "video") return msg.text?.trim() || "Video";
   return msg.text || "Original message";
 }
 

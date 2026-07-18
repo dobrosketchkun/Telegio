@@ -180,15 +180,25 @@ function setReply(messageId) {
     msg.senderPeerId === store.selfPeerId
       ? "You"
       : sender?.displayName || msg.senderPeerId || "Message";
+  const mime = msg.mediaIds?.[0]
+    ? resolveMediaMime(msg.mediaIds[0]) || msg.mediaInfo?.[0]?.mime
+    : null;
+  const asVideo =
+    msg.kind === "video" ||
+    (msg.kind === "media" &&
+      msg.mediaIds?.length === 1 &&
+      String(mime || "")
+        .toLowerCase()
+        .startsWith("video/"));
   els.replyBarText.textContent =
     msg.kind === "sticker"
       ? "Sticker"
-      : msg.kind === "media"
-        ? msg.text?.trim() || "Photo"
-        : msg.kind === "album"
-          ? msg.text?.trim() || "Album"
-          : msg.kind === "video"
-            ? msg.text?.trim() || "Video"
+      : asVideo
+        ? msg.text?.trim() || "Video"
+        : msg.kind === "media"
+          ? msg.text?.trim() || "Photo"
+          : msg.kind === "album"
+            ? msg.text?.trim() || "Album"
             : msg.text || "";
   els.replyBar.hidden = false;
   els.composeInput.focus();
@@ -335,6 +345,7 @@ function paint() {
       onReply: (messageId) => setReply(messageId),
       onEdit: (messageId) => setEdit(messageId),
       getMediaUrl: (mediaId) => resolveMediaUrl(mediaId),
+      getMediaMime: (mediaId) => resolveMediaMime(mediaId),
       onOpenMedia: (url) => openLightbox(url),
       onDownloadMedia: (mediaId) => {
         if (mode === "online" && session) {
@@ -364,11 +375,19 @@ function paint() {
       !els.uploadStatus.hidden &&
       /Downloading/i.test(els.uploadStatus.textContent || "")
     ) {
-      const waiting = thread.messages.some(
-        (m) =>
-          m.kind === "video" &&
-          m.mediaIds?.some((id) => !resolveMediaUrl(id)),
-      );
+      const waiting = thread.messages.some((m) => {
+        if (!m.mediaIds?.length) return false;
+        const mime =
+          m.mediaInfo?.[0]?.mime || resolveMediaMime(m.mediaIds[0]);
+        const asVideo =
+          m.kind === "video" ||
+          (m.kind === "media" &&
+            m.mediaIds.length === 1 &&
+            String(mime || "")
+              .toLowerCase()
+              .startsWith("video/"));
+        return asVideo && m.mediaIds.some((id) => !resolveMediaUrl(id));
+      });
       if (!waiting) setUploadStatus("");
     }
   }
@@ -699,6 +718,16 @@ function openNewGroupModal() {
       paint();
     },
   );
+}
+
+function resolveMediaMime(mediaId) {
+  if (mode === "online" && session) {
+    return session.getMediaEntry(mediaId)?.mime || null;
+  }
+  if (mode === "fixture" && fixtureStore?.media) {
+    return fixtureStore.media.get(mediaId)?.mime || null;
+  }
+  return null;
 }
 
 function resolveMediaUrl(mediaId) {
