@@ -47,15 +47,33 @@ export function renderChatList(root, chats, activeId, onSelect) {
  * @param {object | null} thread
  * @param {string} selfPeerId
  * @param {import("../engine.js").HostState} hostState
+ * @param {{
+ *   isHost?: boolean,
+ *   sessionEnded?: boolean,
+ *   subtitle?: string,
+ *   onDeleteGroup?: () => void,
+ *   onDeleteMessage?: (messageId: string) => void,
+ * }} [opts]
  */
-export function renderThread(headerEl, messagesEl, thread, selfPeerId, hostState) {
+export function renderThread(
+  headerEl,
+  messagesEl,
+  thread,
+  selfPeerId,
+  hostState,
+  opts = {},
+) {
   if (!thread) {
     headerEl.innerHTML = `
-      <div class="chat-header__meta">
-        <h1 class="chat-header__title">Select a chat</h1>
-        <p class="chat-header__sub">Fixture mode — no network</p>
+      <div class="chat-header__left">
+        <div class="chat-header__meta">
+          <h1 class="chat-header__title">Select a chat</h1>
+          <p class="chat-header__sub"></p>
+        </div>
       </div>
     `;
+    headerEl.querySelector(".chat-header__sub").textContent =
+      opts.subtitle || "Create a DM or group to start";
     messagesEl.innerHTML = `
       <div class="empty">
         <div class="empty__card">Pick a chat from the list to view messages.</div>
@@ -78,15 +96,33 @@ export function renderThread(headerEl, messagesEl, thread, selfPeerId, hostState
   }
 
   headerEl.innerHTML = `
-    <div class="avatar avatar--g${hashHue(chat.id)}" style="width:42px;height:42px;font-size:15px"></div>
-    <div class="chat-header__meta">
-      <h1 class="chat-header__title"></h1>
-      <p class="chat-header__sub"></p>
+    <div class="chat-header__left">
+      <div class="avatar avatar--g${hashHue(chat.id)}" style="width:42px;height:42px;font-size:15px"></div>
+      <div class="chat-header__meta">
+        <h1 class="chat-header__title"></h1>
+        <p class="chat-header__sub"></p>
+      </div>
     </div>
+    <div class="chat-header__actions"></div>
   `;
   headerEl.querySelector(".avatar").textContent = initials(title);
   headerEl.querySelector(".chat-header__title").textContent = title;
   headerEl.querySelector(".chat-header__sub").textContent = sub;
+
+  const actions = headerEl.querySelector(".chat-header__actions");
+  if (
+    kind === "group" &&
+    opts.isHost &&
+    !opts.sessionEnded &&
+    typeof opts.onDeleteGroup === "function"
+  ) {
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "btn btn--small";
+    del.textContent = "Delete group";
+    del.addEventListener("click", () => opts.onDeleteGroup());
+    actions.append(del);
+  }
 
   messagesEl.innerHTML = "";
   for (const msg of messages) {
@@ -105,6 +141,24 @@ export function renderThread(headerEl, messagesEl, thread, selfPeerId, hostState
       name.className = `bubble__name bubble__name--c${ci % 5}`;
       name.textContent = sender?.displayName || msg.senderPeerId;
       bubble.append(name);
+    }
+
+    const canDelete =
+      kind === "group" &&
+      !opts.sessionEnded &&
+      typeof opts.onDeleteMessage === "function" &&
+      (opts.isHost || outgoing);
+
+    if (canDelete) {
+      const delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.className = "btn btn--danger bubble__delete";
+      delBtn.textContent = "Delete";
+      delBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        opts.onDeleteMessage(msg.id);
+      });
+      bubble.append(delBtn);
     }
 
     const text = document.createElement("div");
