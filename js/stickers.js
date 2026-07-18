@@ -6,6 +6,19 @@ const RECENTS_KEY = "ephchat.stickerRecents";
 const MAX_RECENTS = 40;
 
 /**
+ * stickers.from.tg serves pack JSON without Access-Control-Allow-Origin,
+ * so browser fetch() fails (images via <img> still work). Try direct first,
+ * then public CORS proxies for metadata only.
+ * @type {((url: string) => string)[]}
+ */
+const PACK_JSON_FETCHERS = [
+  (url) => url,
+  (url) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+  (url) =>
+    `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+];
+
+/**
  * @typedef {{ id: string, emoji?: string, file_url: string, thumbnail_url: string }} StickerEntry
  * @typedef {{ name: string, title: string, stickers: StickerEntry[], addedAt: number }} StickerPack
  * @typedef {{ pack: string, stickerId: string, emoji?: string }} StickerRef
@@ -81,14 +94,49 @@ function absolutize(relativeOrAbsolute) {
 }
 
 /**
+ * Fetch pack JSON, bypassing missing CORS on the sticker proxy when needed.
+ * @param {string} packName
+ * @returns {Promise<object>}
+ */
+async function fetchPackJson(packName) {
+  const url = `${PROXY_ORIGIN}/${encodeURIComponent(packName)}`;
+  /** @type {unknown} */
+  let lastError = null;
+  for (const wrap of PACK_JSON_FETCHERS) {
+    const fetchUrl = wrap(url);
+    try {
+      const res = await fetch(fetchUrl);
+      if (!res.ok) {
+        lastError = new Error(`HTTP ${res.status}`);
+        continue;
+      }
+      const data = await res.json();
+      if (!data || typeof data !== "object") {
+        lastError = new Error("Invalid pack JSON");
+        continue;
+      }
+      return data;
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  const msg =
+    lastError instanceof Error ? lastError.message : String(lastError || "");
+  if (/failed to fetch|networkerror|load failed/i.test(msg)) {
+    throw new Error(
+      "Blocked by CORS (proxy has no Access-Control-Allow-Origin)",
+    );
+  }
+  throw new Error(msg || "Pack fetch failed");
+}
+
+/**
  * @param {string} name
  * @returns {Promise<StickerPack>}
  */
 export async function fetchPack(name) {
   const packName = parsePackRef(name) || name;
-  const res = await fetch(`${PROXY_ORIGIN}/${encodeURIComponent(packName)}`);
-  if (!res.ok) throw new Error(`Pack fetch failed (${res.status})`);
-  const data = await res.json();
+  const data = await fetchPackJson(packName);
   if (!data?.exists && data?.exists !== undefined) {
     throw new Error(`Pack not found: ${packName}`);
   }
