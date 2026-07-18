@@ -201,6 +201,61 @@ export function applyHost(state, action, ctx) {
       return { ok: true, state: next, effects };
     }
 
+    case "add-group-members": {
+      const chatId = action.chatId;
+      const addIds = uniqueStrings(
+        Array.isArray(action.memberPeerIds) ? action.memberPeerIds : [],
+      ).filter((pid) => pid !== actor);
+      if (!chatId || !next.groups[chatId]) {
+        return { ok: false, error: "Unknown group" };
+      }
+      const chat = next.groups[chatId];
+      const canAdd =
+        isHostPeer(next, actor) || chat.memberPeerIds.includes(actor);
+      if (!canAdd) {
+        return { ok: false, error: "Not allowed to add members" };
+      }
+      if (!addIds.length) {
+        return { ok: false, error: "No members to add" };
+      }
+      /** @type {string[]} */
+      const added = [];
+      for (const pid of addIds) {
+        if (!rosterHas(next, pid)) {
+          return { ok: false, error: `Unknown peer: ${pid}` };
+        }
+        if (chat.memberPeerIds.includes(pid)) continue;
+        chat.memberPeerIds = [...chat.memberPeerIds, pid];
+        added.push(pid);
+      }
+      if (!added.length) {
+        return { ok: false, error: "Those peers are already in the group" };
+      }
+      effects.push({ event: "chat-created", chat: clone(chat) });
+      const names = added
+        .map(
+          (pid) =>
+            next.roster.find((r) => r.peerId === pid)?.displayName || pid,
+        )
+        .join(", ");
+      const actorName =
+        next.roster.find((r) => r.peerId === actor)?.displayName || "Someone";
+      const sys = {
+        id: mintId("sys"),
+        chatId,
+        senderPeerId: "",
+        createdAt: Date.now(),
+        kind: /** @type {const} */ ("system"),
+        text: `${actorName} added ${names}`,
+      };
+      next.groupMessages[chatId] = [
+        ...(next.groupMessages[chatId] || []),
+        sys,
+      ];
+      effects.push({ event: "message-added", chatId, message: sys });
+      return { ok: true, state: next, effects };
+    }
+
     case "send-text": {
       const chatId = action.chatId;
       const text = String(action.text ?? "");

@@ -36,6 +36,7 @@ import {
   prepareVideo,
 } from "./media.js";
 import { decodeFrame, encodeFrame } from "./protocol.js";
+import { remapHostPeer } from "./resume.js";
 import { loadTrystero, roomConfig } from "./trystero.js";
 
 /**
@@ -106,6 +107,8 @@ export class ChatSession {
     this._mediaMeta = new Map();
     /** @type {Set<string>} mediaIds user tapped Download for (or own sends). */
     this._mediaUnlocked = new Set();
+    /** @type {ReturnType<typeof setTimeout> | null} */
+    this._hostGraceTimer = null;
   }
 
   /**
@@ -186,7 +189,14 @@ export class ChatSession {
   }
 
   /**
-   * @param {{ displayName: string, title?: string }} opts
+   * @param {{
+   *   displayName: string,
+   *   title?: string,
+   *   sessionId?: string,
+   *   restoreHostState?: object,
+   *   restoreDmState?: object,
+   *   previousHostPeerId?: string,
+   * }} opts
    */
   async createHost(opts) {
     const displayName = String(opts.displayName || "").trim() || "Host";
@@ -198,22 +208,46 @@ export class ChatSession {
     this.role = "host";
     log("host", "trystero loaded", { selfId });
 
-    const sessionId = makeSessionId();
+    const sessionId = String(opts.sessionId || "").trim() || makeSessionId();
     this._sessionId = sessionId;
-    this.hostState = createHostState({
-      sessionId,
-      title,
-      hostPeer: {
-        peerId: selfId,
+
+    if (opts.restoreHostState) {
+      const oldHost =
+        opts.previousHostPeerId ||
+        opts.restoreHostState.roster?.find((r) => r.role === "host")?.peerId ||
+        "";
+      this.hostState = remapHostPeer(
+        opts.restoreHostState,
+        oldHost,
+        selfId,
         displayName,
-        role: "host",
-        joinedAt: Date.now(),
-        colorIndex: 0,
-      },
-    });
+      );
+      this.hostState.session = {
+        ...this.hostState.session,
+        id: sessionId,
+        title: title || this.hostState.session?.title || "Session",
+        ended: false,
+      };
+      this.dmState = opts.restoreDmState || createEmptyDmState();
+      log("host", "session resumed", { sessionId, oldHost, selfId });
+    } else {
+      this.hostState = createHostState({
+        sessionId,
+        title,
+        hostPeer: {
+          peerId: selfId,
+          displayName,
+          role: "host",
+          joinedAt: Date.now(),
+          colorIndex: 0,
+        },
+      });
+      this.dmState = createEmptyDmState();
+      log("host", "session minted", { sessionId, title });
+    }
+
     this.inviteUrl = mintInviteUrl(sessionId);
-    this.dmState = createEmptyDmState();
-    log("host", "session minted", { sessionId, title, inviteUrl: this.inviteUrl });
+    log("host", "invite", this.inviteUrl);
 
     await this._joinRoom(joinRoom, sessionId);
     this.hooks.onStatus(this._statusLabel());
@@ -246,10 +280,21 @@ export class ChatSession {
     return this;
   }
 
-  leave() {
+  /**
+   * @param {{ endSession?: boolean }} [opts]
+   *   endSession=false skips broadcasting session-ended (used on refresh when resuming).
+   */
+  leave(opts = {}) {
+    const endSession = opts.endSession !== false;
     this._stopHelloRetry();
     this._stopDiag();
-    if (this.role === "host" && this.hostState && !this.sessionEnded) {
+    this._clearHostGrace();
+    if (
+      endSession &&
+      this.role === "host" &&
+      this.hostState &&
+      !this.sessionEnded
+    ) {
       this._endSessionLocal("Host left");
       try {
         this._send(encodeFrame("session-ended", { reason: "host-left" }));
@@ -264,6 +309,26 @@ export class ChatSession {
     }
     this._room = null;
     this._chat = null;
+  }
+
+  /** Snapshot for sessionStorage resume. */
+  getResumeSnapshot() {
+    if (!this._sessionId) return null;
+    return {
+      role: this.role,
+      sessionId: this._sessionId,
+      displayName:
+        this.hostState?.roster?.find((r) => r.peerId === this.selfPeerId)
+          ?.displayName ||
+        this._pendingDisplayName ||
+        "User",
+      title: this.hostState?.session?.title,
+      hostState: this.role === "host" ? this.hostState : undefined,
+      dmState: this.dmState,
+      previousHostPeerId:
+        this.role === "host" ? this.selfPeerId : undefined,
+      previousSelfPeerId: this.selfPeerId,
+    };
   }
 
   /**
@@ -1016,9 +1081,15 @@ export class ChatSession {
           }
         }, 800);
       }
-      if (this.role === "guest" && !this.hostState) {
-        log("guest", "hello → peer join", peerId);
+      if (
+        this.role === "guest" &&
+        (!this.hostState || this._hostGraceTimer)
+      ) {
+        log("guest", "hello → peer join", peerId, {
+          grace: Boolean(this._hostGraceTimer),
+        });
         this._sendHello(peerId);
+        if (this._hostGraceTimer) this._startHelloRetry();
       }
       this.hooks.onStatus(this._statusLabel());
       this.hooks.onChange();
@@ -1050,7 +1121,8 @@ export class ChatSession {
       if (this.role === "guest" && this.hostState) {
         const hostId = getHostPeerId(this.hostState);
         if (peerId === hostId) {
-          this._endSessionLocal("Host left");
+          // Host may be refreshing — wait briefly before ending.
+          this._startHostGrace();
         }
       }
       this.hooks.onStatus(this._statusLabel());
@@ -1058,16 +1130,25 @@ export class ChatSession {
     };
 
     this._startDiag();
+  }
 
-    window.addEventListener("beforeunload", () => {
-      if (this.role === "host") {
-        try {
-          this._send(encodeFrame("session-ended", { reason: "host-left" }));
-        } catch {
-          /* ignore */
-        }
+  _clearHostGrace() {
+    if (this._hostGraceTimer) {
+      clearTimeout(this._hostGraceTimer);
+      this._hostGraceTimer = null;
+    }
+  }
+
+  _startHostGrace() {
+    this._clearHostGrace();
+    this.hooks.onStatus("Host reconnecting…");
+    this._hostGraceTimer = setTimeout(() => {
+      this._hostGraceTimer = null;
+      if (!this.sessionEnded) {
+        this._endSessionLocal("Host left");
+        this.hooks.onChange();
       }
-    });
+    }, 20_000);
   }
 
   /**
@@ -1124,20 +1205,21 @@ export class ChatSession {
       }
       const displayName = String(body.displayName || "").trim() || "Guest";
       this._awaitingHello.delete(peerId);
+      const already = this.hostState.roster.some((r) => r.peerId === peerId);
       this.hostState = addRosterPeer(this.hostState, {
         peerId,
         displayName,
       });
-      // Announce join in every existing group (session-wide visibility in group threads)
-      const allGroupIds = Object.keys(this.hostState.groups);
-      if (allGroupIds.length) {
-        const sys = appendSystemToGroups(
-          this.hostState,
-          `${displayName} joined the session`,
-          allGroupIds,
-        );
-        this.hostState = sys.state;
-        this._emitEffects(sys.effects, false);
+      // Do NOT post "joined the session" into groups — new peers are not members yet.
+      // Group-visible join lines happen when someone is added via add-group-members.
+      if (already) {
+        // Re-hello after refresh: refresh display name if changed
+        this.hostState = {
+          ...this.hostState,
+          roster: this.hostState.roster.map((r) =>
+            r.peerId === peerId ? { ...r, displayName } : r,
+          ),
+        };
       }
       const filtered = filterHostStateForPeer(this.hostState, peerId);
       log("host", "welcome →", peerId, {
@@ -1222,6 +1304,8 @@ export class ChatSession {
         warn("guest", "welcome missing state", body);
         return;
       }
+      this._clearHostGrace();
+      this.ended = false;
       this.hostState = state;
       // Ensure roster from welcome body if fuller
       if (Array.isArray(body.roster)) {
@@ -2124,6 +2208,7 @@ export class ChatSession {
 
   _statusLabel() {
     if (this.sessionEnded) return "Session ended";
+    if (this._hostGraceTimer) return "Host reconnecting…";
     if (this.role === "guest" && !this.hostState) {
       if (this.connectedPeers.size === 0) {
         return "Looking for host… (VPN often blocks P2P — try without VPN)";

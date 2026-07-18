@@ -126,6 +126,7 @@ export function renderChatList(root, chats, activeId, unread, onSelect, opts = {
  *   sessionEnded?: boolean,
  *   subtitle?: string,
  *   onDeleteGroup?: () => void,
+ *   onAddMembers?: () => void,
  *   onDeleteMessage?: (messageId: string) => void,
  *   onReply?: (messageId: string) => void,
  *   onEdit?: (messageId: string) => void,
@@ -201,6 +202,18 @@ export function renderThread(
   }
 
   const actions = headerEl.querySelector(".chat-header__actions");
+  if (
+    kind === "group" &&
+    !opts.sessionEnded &&
+    typeof opts.onAddMembers === "function"
+  ) {
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "btn btn--small";
+    add.textContent = "Add members";
+    add.addEventListener("click", () => opts.onAddMembers());
+    actions.append(add);
+  }
   if (
     kind === "group" &&
     opts.isHost &&

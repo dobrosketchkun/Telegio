@@ -31,6 +31,12 @@ import {
   toggleMuted,
   togglePinned,
 } from "../prefs.js";
+import {
+  clearResume,
+  loadResume,
+  remapDmPeer,
+  saveResume,
+} from "../resume.js";
 import { selfCheckEnvelope } from "../protocol.js";
 import { ChatSession } from "../session.js";
 import { ensureFixturePacks } from "../stickers.js";
@@ -371,6 +377,7 @@ function paint() {
           });
         }
       },
+      onAddMembers: () => openAddMembersModal(),
       onDeleteMessage: (messageId) => {
         if (!activeChatId) return;
         if (mode === "online" && session) {
@@ -975,10 +982,30 @@ function togglePicker() {
   if (open) picker.render();
 }
 
-async function startOnlineHost(displayName, title) {
+function persistResume() {
+  if (mode !== "online" || !session) return;
+  const snap = session.getResumeSnapshot();
+  if (!snap?.sessionId) return;
+  if (session.sessionEnded) {
+    clearResume();
+    return;
+  }
+  saveResume(snap);
+}
+
+/**
+ * @param {string} displayName
+ * @param {string} title
+ * @param {import("../resume.js").ResumeBlob} [resume]
+ */
+async function startOnlineHost(displayName, title, resume) {
   mode = "online";
   session = new ChatSession({
-    onChange: () => paint(),
+    onChange: () => {
+      if (session?.sessionEnded) clearResume();
+      else persistResume();
+      paint();
+    },
     onStatus: (s) => {
       if (els.connStatus) els.connStatus.textContent = s;
     },
@@ -987,12 +1014,25 @@ async function startOnlineHost(displayName, title) {
   });
   enterAppShell({ badge: "Host", status: "Connecting…" });
   try {
-    await session.createHost({ displayName, title });
-    // Keep status from session.onStatus (e.g. "Online · waiting for guests")
+    await session.createHost({
+      displayName,
+      title: title || resume?.title || "",
+      sessionId: resume?.sessionId,
+      restoreHostState: resume?.hostState,
+      previousHostPeerId: resume?.previousHostPeerId,
+    });
+    if (resume?.dmState && resume.previousSelfPeerId) {
+      session.dmState = remapDmPeer(
+        resume.dmState,
+        resume.previousSelfPeerId,
+        session.selfPeerId,
+      );
+    }
     if (els.inviteBox && els.inviteUrl && session.inviteUrl) {
       els.inviteBox.hidden = false;
       els.inviteUrl.value = session.inviteUrl;
     }
+    persistResume();
     paint();
   } catch (e) {
     showBanner(e?.message || String(e), false);
@@ -1000,10 +1040,19 @@ async function startOnlineHost(displayName, title) {
   }
 }
 
-async function startOnlineGuest(displayName, sessionId) {
+/**
+ * @param {string} displayName
+ * @param {string} sessionId
+ * @param {import("../resume.js").ResumeBlob} [resume]
+ */
+async function startOnlineGuest(displayName, sessionId, resume) {
   mode = "online";
   session = new ChatSession({
-    onChange: () => paint(),
+    onChange: () => {
+      if (session?.sessionEnded) clearResume();
+      else persistResume();
+      paint();
+    },
     onStatus: (s) => {
       if (els.connStatus) els.connStatus.textContent = s;
     },
@@ -1013,11 +1062,80 @@ async function startOnlineGuest(displayName, sessionId) {
   enterAppShell({ badge: "Guest", status: "Connecting…" });
   try {
     await session.joinGuest({ displayName, sessionId });
+    if (resume?.dmState && resume.previousSelfPeerId) {
+      session.dmState = remapDmPeer(
+        resume.dmState,
+        resume.previousSelfPeerId,
+        session.selfPeerId,
+      );
+    }
+    persistResume();
     paint();
   } catch (e) {
     showBanner(e?.message || String(e), false);
     els.connStatus.textContent = "Connection failed";
   }
+}
+
+function openAddMembersModal() {
+  const store = getStore();
+  if (!store || !activeChatId) return;
+  const thread = getChatThread(
+    store.hostState,
+    store.dmState,
+    activeChatId,
+  );
+  if (!thread || thread.kind !== "group") return;
+  const inGroup = new Set(thread.chat.memberPeerIds);
+  const candidates = store.hostState.roster.filter(
+    (r) => !inGroup.has(r.peerId),
+  );
+  if (!candidates.length) {
+    showBanner("Everyone in the session is already in this group", false);
+    return;
+  }
+  openModal(
+    "Add members",
+    (body) => {
+      const list = document.createElement("div");
+      list.className = "modal__list";
+      for (const p of candidates) {
+        const label = document.createElement("label");
+        label.className = "modal__check";
+        label.innerHTML = `<input type="checkbox" name="add-peer" value="${p.peerId}" /> <span></span>`;
+        label.querySelector("span").textContent = p.displayName || p.peerId;
+        list.append(label);
+      }
+      body.append(list);
+    },
+    () => {
+      const ids = [
+        ...els.modalBody.querySelectorAll('input[name="add-peer"]:checked'),
+      ].map((el) => /** @type {HTMLInputElement} */ (el).value);
+      if (!ids.length) return;
+      closeModal();
+      if (mode === "online" && session) {
+        session.dispatchHostAction({
+          type: "add-group-members",
+          chatId: activeChatId,
+          memberPeerIds: ids,
+        });
+      } else if (mode === "fixture" && fixtureStore) {
+        const r = applyHost(
+          fixtureStore.hostState,
+          {
+            type: "add-group-members",
+            chatId: activeChatId,
+            memberPeerIds: ids,
+          },
+          { actorPeerId: fixtureStore.selfPeerId },
+        );
+        if (r.ok) fixtureStore = { ...fixtureStore, hostState: r.state };
+        paint();
+      }
+    },
+    "Add",
+  );
 }
 
 function closeModal() {
@@ -1700,13 +1818,17 @@ els.modal?.addEventListener("click", (e) => {
   if (e.target === els.modal) closeModal();
 });
 
-window.addEventListener("beforeunload", () => {
-  session?.leave();
+window.addEventListener("pagehide", () => {
+  persistResume();
+  // Soft leave — do not broadcast session-ended so a refresh can resume.
+  session?.leave({ endSession: false });
 });
 
 if (isFixtureMode()) {
   startFixture();
 } else {
+  const resume = loadResume();
+
   if (joinId) {
     // Join links only need a display name — remove title field entirely.
     els.landingTitleField?.remove();
@@ -1717,10 +1839,26 @@ if (isFixtureMode()) {
     if (els.landingSubmit) els.landingSubmit.textContent = "Join session";
   }
 
+  // Auto-resume after refresh (same tab). Prefer ?join= when present.
+  if (
+    resume &&
+    !isFixtureMode() &&
+    (!joinId || (resume.role === "guest" && resume.sessionId === joinId))
+  ) {
+    if (els.landingName) els.landingName.value = resume.displayName || "";
+    if (resume.role === "host" && !joinId) {
+      startOnlineHost(resume.displayName, resume.title || "", resume);
+    } else if (resume.role === "guest") {
+      const sid = joinId || resume.sessionId;
+      startOnlineGuest(resume.displayName, sid, resume);
+    }
+  }
+
   els.landingForm.addEventListener("submit", (e) => {
     e.preventDefault();
     const displayName = els.landingName.value.trim();
     if (!displayName) return;
+    clearResume();
     if (joinId) {
       startOnlineGuest(displayName, joinId);
     } else {
