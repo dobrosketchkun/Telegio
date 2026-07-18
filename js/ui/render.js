@@ -69,6 +69,8 @@ export function renderChatList(root, chats, activeId, unread, onSelect) {
  *   onDeleteMessage?: (messageId: string) => void,
  *   onReply?: (messageId: string) => void,
  *   onEdit?: (messageId: string) => void,
+ *   getMediaUrl?: (mediaId: string) => string | null,
+ *   onOpenMedia?: (url: string) => void,
  * }} [opts]
  */
 export function renderThread(
@@ -194,10 +196,7 @@ export function renderThread(
       }
       const qText = document.createElement("div");
       qText.className = "bubble__quote-text";
-      qText.textContent =
-        parent?.kind === "sticker"
-          ? "Sticker"
-          : parent?.text || "Original message";
+      qText.textContent = quotePreview(parent);
       quote.append(qName, qText);
       bubble.append(quote);
     }
@@ -219,6 +218,44 @@ export function renderThread(
       media.append(img);
       bubble.append(media);
       bubble.classList.add("bubble--sticker");
+    } else if (
+      (msg.kind === "media" || msg.kind === "album") &&
+      msg.mediaIds?.length
+    ) {
+      const wrap = document.createElement("div");
+      wrap.className =
+        msg.kind === "album" ? "bubble__album" : "bubble__photo";
+      for (const mid of msg.mediaIds) {
+        const url =
+          typeof opts.getMediaUrl === "function" ? opts.getMediaUrl(mid) : null;
+        if (url) {
+          const img = document.createElement("img");
+          img.className = "media-img";
+          img.src = url;
+          img.alt = "Photo";
+          img.loading = "lazy";
+          img.addEventListener("click", (e) => {
+            e.stopPropagation();
+            opts.onOpenMedia?.(url);
+          });
+          wrap.append(img);
+        } else {
+          const ph = document.createElement("div");
+          ph.className = "media-placeholder";
+          ph.textContent = "…";
+          wrap.append(ph);
+        }
+      }
+      bubble.append(wrap);
+      bubble.classList.add(
+        msg.kind === "album" ? "bubble--album" : "bubble--media",
+      );
+      if (msg.text) {
+        const text = document.createElement("div");
+        text.className = "bubble__text";
+        text.append(renderEntities(msg.text, msg.entities));
+        bubble.append(text);
+      }
     } else {
       const text = document.createElement("div");
       text.className = "bubble__text";
@@ -237,7 +274,13 @@ export function renderThread(
     const time = document.createElement("span");
     time.textContent = formatTime(msg.createdAt);
     meta.append(time);
-    if (outgoing && (msg.kind === "text" || msg.kind === "sticker")) {
+    if (
+      outgoing &&
+      (msg.kind === "text" ||
+        msg.kind === "sticker" ||
+        msg.kind === "media" ||
+        msg.kind === "album")
+    ) {
       const checks = document.createElement("span");
       checks.className = "checks";
       const delivered = isFullyDelivered(
@@ -310,6 +353,15 @@ export function renderThread(
   } else {
     messagesEl.scrollTop = prevScroll.top;
   }
+}
+
+/** @param {import("../engine.js").Message | undefined} msg */
+function quotePreview(msg) {
+  if (!msg) return "Original message";
+  if (msg.kind === "sticker") return "Sticker";
+  if (msg.kind === "media") return msg.text?.trim() || "Photo";
+  if (msg.kind === "album") return msg.text?.trim() || "Album";
+  return msg.text || "Original message";
 }
 
 /** @param {string} name */

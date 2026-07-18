@@ -1,4 +1,9 @@
-import { APP_ID, APP_VERSION } from "./constants.js";
+import {
+  APP_ID,
+  APP_VERSION,
+  HOST_MEDIA_BUDGET_BYTES,
+  MAX_ALBUM_ITEMS,
+} from "./constants.js";
 import {
   addRosterPeer,
   appendSystemToGroups,
@@ -15,8 +20,28 @@ import {
 import { makeSessionId, dmIdFor } from "./ids.js";
 import { mintInviteUrl } from "./invite.js";
 import { error as logError, log, warn } from "./log.js";
+import {
+  blobFromBase64Chunks,
+  blobToBase64Chunks,
+  compressImage,
+  mintMediaId,
+} from "./media.js";
 import { decodeFrame, encodeFrame } from "./protocol.js";
 import { loadTrystero, roomConfig } from "./trystero.js";
+
+/**
+ * @typedef {{
+ *   mime: string,
+ *   size: number,
+ *   width?: number,
+ *   height?: number,
+ *   blob: Blob,
+ *   senderPeerId: string,
+ *   chatId?: string,
+ *   dmId?: string,
+ *   objectUrl?: string,
+ * }} MediaEntry
+ */
 
 /**
  * @typedef {{
@@ -60,6 +85,47 @@ export class ChatSession {
     this._pendingDisplayName = "";
     /** @type {string} */
     this._sessionId = "";
+    /** @type {Map<string, MediaEntry>} host group media store */
+    this.mediaStore = new Map();
+    /** @type {Map<string, MediaEntry>} blobs this peer can render */
+    this.localMedia = new Map();
+    /** @type {number} */
+    this.hostMediaBytes = 0;
+    /** @type {Map<string, { meta: object, chunks: string[], from: string }>} */
+    this._incoming = new Map();
+    /** @type {Map<string, { resolve: (v: boolean) => void, reject: (e: Error) => void }>} */
+    this._uploadWaiters = new Map();
+    /** @type {Set<string>} */
+    this._fetching = new Set();
+  }
+
+  /**
+   * @param {string} mediaId
+   * @returns {string | null} object URL
+   */
+  getMediaUrl(mediaId) {
+    const entry = this.localMedia.get(mediaId) || this.mediaStore.get(mediaId);
+    if (!entry?.blob) return null;
+    if (!entry.objectUrl) {
+      entry.objectUrl = URL.createObjectURL(entry.blob);
+      this.localMedia.set(mediaId, entry);
+    }
+    return entry.objectUrl;
+  }
+
+  /** @param {string} mediaId @returns {MediaEntry | undefined} */
+  getMediaEntry(mediaId) {
+    return this.localMedia.get(mediaId) || this.mediaStore.get(mediaId);
+  }
+
+  /**
+   * @param {string} mediaId
+   * @param {MediaEntry} entry
+   */
+  putLocalMedia(mediaId, entry) {
+    const prev = this.localMedia.get(mediaId);
+    if (prev?.objectUrl) URL.revokeObjectURL(prev.objectUrl);
+    this.localMedia.set(mediaId, { ...entry, objectUrl: undefined });
   }
 
   get roster() {
@@ -309,6 +375,152 @@ export class ChatSession {
   }
 
   /**
+   * Compress + upload images to host store (or local if host).
+   * @param {Blob[]} files
+   * @param {{ chatId?: string, onProgress?: (label: string) => void }} [opts]
+   * @returns {Promise<string[]>} mediaIds
+   */
+  async uploadGroupMedia(files, opts = {}) {
+    if (!files?.length) throw new Error("No images");
+    if (files.length > MAX_ALBUM_ITEMS) {
+      throw new Error(`Album max ${MAX_ALBUM_ITEMS} images`);
+    }
+    const hostId = this.hostState ? getHostPeerId(this.hostState) : null;
+    if (!hostId) throw new Error("No host");
+
+    /** @type {string[]} */
+    const mediaIds = [];
+    let i = 0;
+    for (const file of files) {
+      i += 1;
+      opts.onProgress?.(`Compressing ${i}/${files.length}…`);
+      const compressed = await compressImage(file);
+      const mediaId = mintMediaId();
+      const entry = {
+        mime: compressed.mime,
+        size: compressed.size,
+        width: compressed.width,
+        height: compressed.height,
+        blob: compressed.blob,
+        senderPeerId: this.selfPeerId,
+        chatId: opts.chatId,
+      };
+
+      if (this.role === "host") {
+        this._hostAcceptMedia(mediaId, entry);
+      } else {
+        opts.onProgress?.(`Uploading ${i}/${files.length}…`);
+        await this._transferMediaTo(hostId, mediaId, entry, {
+          chatId: opts.chatId,
+        });
+        this.putLocalMedia(mediaId, entry);
+      }
+      mediaIds.push(mediaId);
+    }
+    return mediaIds;
+  }
+
+  /**
+   * @param {string} chatId
+   * @param {{ mediaIds: string[], text?: string, entities?: object[], replyTo?: string }} media
+   */
+  sendGroupMedia(chatId, media) {
+    this.dispatchHostAction({
+      type: "send-media",
+      chatId,
+      mediaIds: media.mediaIds,
+      text: media.text,
+      entities: media.entities,
+      replyTo: media.replyTo,
+    });
+  }
+
+  /**
+   * Compress, P2P transfer to DM peer, then dm-send-media.
+   * @param {string} dmId
+   * @param {Blob[]} files
+   * @param {{ text?: string, entities?: object[], replyTo?: string, onProgress?: (label: string) => void }} [opts]
+   */
+  async sendDmMedia(dmId, files, opts = {}) {
+    if (!files?.length) throw new Error("No images");
+    if (files.length > MAX_ALBUM_ITEMS) {
+      throw new Error(`Album max ${MAX_ALBUM_ITEMS} images`);
+    }
+    const other = this._dmOther(dmId);
+    if (!other) throw new Error("DM peer missing");
+
+    /** @type {string[]} */
+    const mediaIds = [];
+    let i = 0;
+    for (const file of files) {
+      i += 1;
+      opts.onProgress?.(`Compressing ${i}/${files.length}…`);
+      const compressed = await compressImage(file);
+      const mediaId = mintMediaId();
+      const entry = {
+        mime: compressed.mime,
+        size: compressed.size,
+        width: compressed.width,
+        height: compressed.height,
+        blob: compressed.blob,
+        senderPeerId: this.selfPeerId,
+        dmId,
+      };
+      this.putLocalMedia(mediaId, entry);
+      opts.onProgress?.(`Sending ${i}/${files.length}…`);
+      await this._transferMediaTo(other, mediaId, entry, { dmId });
+      mediaIds.push(mediaId);
+    }
+
+    const r = applyDm(this.dmState, this.selfPeerId, {
+      type: "dm-send-media",
+      dmId,
+      mediaIds,
+      text: opts.text,
+      entities: opts.entities,
+      replyTo: opts.replyTo,
+    });
+    if (!r.ok || !r.message) {
+      this.hooks.onError(r.error || "Media send failed");
+      return;
+    }
+    this.dmState = r.state;
+    this._send(
+      encodeFrame("dm-send-media", {
+        dmId,
+        message: r.message,
+        mediaIds,
+        text: opts.text,
+      }),
+      other,
+    );
+    this.hooks.onChange();
+  }
+
+  /**
+   * Request any missing media ids (group path).
+   * @param {string[]} mediaIds
+   */
+  ensureMedia(mediaIds) {
+    if (!this.hostState) return;
+    const hostId = getHostPeerId(this.hostState);
+    for (const id of mediaIds || []) {
+      if (!id || this.localMedia.has(id) || this.mediaStore.has(id)) continue;
+      if (this._fetching.has(id)) continue;
+      this._fetching.add(id);
+      if (this.role === "host") {
+        const entry = this.mediaStore.get(id);
+        if (entry) this.putLocalMedia(id, entry);
+        this._fetching.delete(id);
+        continue;
+      }
+      if (!hostId) continue;
+      log("media", "request", id);
+      this._send(encodeFrame("media-request", { mediaId: id }), hostId);
+    }
+  }
+
+  /**
    * @param {string} chatId
    * @param {string} messageId
    * @param {string} text
@@ -509,6 +721,11 @@ export class ChatSession {
       return;
     }
 
+    if (String(type).startsWith("media-")) {
+      this._onMediaFrame(type, body, peerId);
+      return;
+    }
+
     if (this.role === "host") {
       this._onHostFrame(type, body, peerId);
     } else {
@@ -603,6 +820,7 @@ export class ChatSession {
       type === "dm-open" ||
       type === "dm-send-text" ||
       type === "dm-send-sticker" ||
+      type === "dm-send-media" ||
       type === "dm-edit" ||
       type === "dm-ack" ||
       type === "dm-delete"
@@ -659,6 +877,9 @@ export class ChatSession {
       this.hostState = applyHostEvent(this.hostState, body);
       if (body.event === "message-added" && body.message) {
         this._ackGroupMessage(body.chatId || body.message.chatId, body.message);
+        if (body.message.mediaIds?.length) {
+          this.ensureMedia(body.message.mediaIds);
+        }
       }
       this.hooks.onChange();
       return;
@@ -688,6 +909,7 @@ export class ChatSession {
       type === "dm-open" ||
       type === "dm-send-text" ||
       type === "dm-send-sticker" ||
+      type === "dm-send-media" ||
       type === "dm-edit" ||
       type === "dm-ack" ||
       type === "dm-delete"
@@ -759,6 +981,33 @@ export class ChatSession {
           message: body.message,
           pack: body.pack || body.message?.sticker?.pack,
           stickerId: body.stickerId || body.message?.sticker?.stickerId,
+        },
+        { remoteSenderPeerId: peerId },
+      );
+      if (r.ok) {
+        this.dmState = r.state;
+        if (body.message?.id || r.message?.id) {
+          const id = body.message?.id || r.message.id;
+          this._send(
+            encodeFrame("dm-ack", { dmId, messageIds: [id] }),
+            peerId,
+          );
+        }
+        this.hooks.onChange();
+      }
+      return;
+    }
+
+    if (type === "dm-send-media") {
+      const r = applyDm(
+        this.dmState,
+        this.selfPeerId,
+        {
+          type: "dm-send-media",
+          dmId,
+          message: body.message,
+          mediaIds: body.mediaIds || body.message?.mediaIds,
+          text: body.text || body.message?.text,
         },
         { remoteSenderPeerId: peerId },
       );
@@ -851,6 +1100,9 @@ export class ChatSession {
           effect.chatId || effect.message.chatId,
           effect.message,
         );
+        if (effect.message.mediaIds?.length) {
+          this.ensureMedia(effect.message.mediaIds);
+        }
       }
     }
   }
@@ -928,9 +1180,272 @@ export class ChatSession {
   }
 
   /**
-   * @param {object} frame
-   * @param {string} [peerId]
+   * @param {string} type
+   * @param {object} body
+   * @param {string} peerId
    */
+  _onMediaFrame(type, body, peerId) {
+    const mediaId = String(body.mediaId || "").trim();
+    if (!mediaId && type !== "media-request") return;
+
+    if (type === "media-offer") {
+      if (body.dmId) {
+        const expected = dmIdFor(this.selfPeerId, peerId);
+        if (body.dmId !== expected) {
+          warn("media", "ignore DM offer for other pair", body.dmId);
+          return;
+        }
+      } else if (this.role !== "host") {
+        // Guests only accept offers when fetching (host→guest) or DM.
+        // Group uploads are host-only; ignore peer→guest group offers.
+      }
+      log("media", "offer", mediaId, {
+        size: body.size,
+        from: peerId,
+        dm: Boolean(body.dmId),
+      });
+      this._incoming.set(mediaId, {
+        meta: body,
+        chunks: [],
+        from: peerId,
+      });
+      return;
+    }
+
+    if (type === "media-chunk") {
+      const inc = this._incoming.get(mediaId);
+      if (!inc) return;
+      const index = Number(body.index) || 0;
+      inc.chunks[index] = String(body.data || "");
+      return;
+    }
+
+    if (type === "media-complete") {
+      // Ack from receiver → resolve uploader waiter
+      if (typeof body.ok === "boolean") {
+        const waiter = this._uploadWaiters.get(mediaId);
+        if (waiter) {
+          this._uploadWaiters.delete(mediaId);
+          if (body.ok) waiter.resolve(true);
+          else waiter.reject(new Error(body.reason || "Media rejected"));
+        }
+        return;
+      }
+
+      // Uploader finished sending chunks → assemble
+      const inc = this._incoming.get(mediaId);
+      if (!inc) return;
+      try {
+        const blob = blobFromBase64Chunks(
+          inc.chunks.filter(Boolean),
+          inc.meta.mime || "image/jpeg",
+        );
+        /** @type {MediaEntry} */
+        const entry = {
+          mime: inc.meta.mime || blob.type || "image/jpeg",
+          size: Number(inc.meta.size) || blob.size,
+          width: inc.meta.width,
+          height: inc.meta.height,
+          blob,
+          senderPeerId: peerId,
+          chatId: inc.meta.chatId,
+          dmId: inc.meta.dmId,
+        };
+
+        if (inc.meta.dmId) {
+          this.putLocalMedia(mediaId, entry);
+        } else if (this.role === "host") {
+          const ok = this._hostAcceptMedia(mediaId, entry);
+          if (!ok) {
+            this._incoming.delete(mediaId);
+            this._send(
+              encodeFrame("media-complete", {
+                mediaId,
+                ok: false,
+                reason: "Host media budget exceeded",
+              }),
+              peerId,
+            );
+            return;
+          }
+        } else {
+          // Guest receiving fetch from host
+          this.putLocalMedia(mediaId, entry);
+          this._fetching.delete(mediaId);
+        }
+
+        this._incoming.delete(mediaId);
+        this._send(
+          encodeFrame("media-complete", { mediaId, ok: true }),
+          peerId,
+        );
+        log("media", "assembled", mediaId, entry.size);
+        this.hooks.onChange();
+      } catch (e) {
+        this._incoming.delete(mediaId);
+        this._fetching.delete(mediaId);
+        this._send(
+          encodeFrame("media-complete", {
+            mediaId,
+            ok: false,
+            reason: e?.message || "Assemble failed",
+          }),
+          peerId,
+        );
+      }
+      return;
+    }
+
+    if (type === "media-request") {
+      const id = mediaId || String(body.mediaId || "").trim();
+      const entry = this.mediaStore.get(id) || this.localMedia.get(id);
+      if (!entry) {
+        this._send(
+          encodeFrame("media-reject", { mediaId: id, reason: "Unknown media" }),
+          peerId,
+        );
+        return;
+      }
+      log("media", "serve request", id, "→", peerId);
+      this._streamMediaTo(peerId, id, entry).catch((err) =>
+        logError("media", "stream failed", err),
+      );
+      return;
+    }
+
+    if (type === "media-reject") {
+      const waiter = this._uploadWaiters.get(mediaId);
+      if (waiter) {
+        this._uploadWaiters.delete(mediaId);
+        waiter.reject(new Error(body.reason || "Media rejected"));
+      }
+      this._fetching.delete(mediaId);
+      warn("media", "rejected", mediaId, body.reason);
+    }
+  }
+
+  /**
+   * @param {string} mediaId
+   * @param {MediaEntry} entry
+   * @returns {boolean}
+   */
+  _hostAcceptMedia(mediaId, entry) {
+    if (this.mediaStore.has(mediaId)) {
+      this.putLocalMedia(mediaId, entry);
+      return true;
+    }
+    if (this.hostMediaBytes + entry.size > HOST_MEDIA_BUDGET_BYTES) {
+      warn("media", "budget exceeded", {
+        have: this.hostMediaBytes,
+        need: entry.size,
+        budget: HOST_MEDIA_BUDGET_BYTES,
+      });
+      return false;
+    }
+    this.mediaStore.set(mediaId, entry);
+    this.hostMediaBytes += entry.size;
+    this.putLocalMedia(mediaId, entry);
+    log("media", "host stored", mediaId, {
+      bytes: this.hostMediaBytes,
+      budget: HOST_MEDIA_BUDGET_BYTES,
+    });
+    return true;
+  }
+
+  /**
+   * @param {string} peerId
+   * @param {string} mediaId
+   * @param {MediaEntry} entry
+   * @param {{ chatId?: string, dmId?: string }} [scope]
+   */
+  async _transferMediaTo(peerId, mediaId, entry, scope = {}) {
+    const chunks = await blobToBase64Chunks(entry.blob);
+    const ack = this._waitUploadAck(mediaId);
+    this._send(
+      encodeFrame("media-offer", {
+        mediaId,
+        mime: entry.mime,
+        size: entry.size,
+        width: entry.width,
+        height: entry.height,
+        chatId: scope.chatId,
+        dmId: scope.dmId,
+      }),
+      peerId,
+    );
+    for (let index = 0; index < chunks.length; index++) {
+      this._send(
+        encodeFrame("media-chunk", {
+          mediaId,
+          index,
+          total: chunks.length,
+          data: chunks[index],
+        }),
+        peerId,
+      );
+    }
+    this._send(encodeFrame("media-complete", { mediaId }), peerId);
+    await ack;
+  }
+
+  /**
+   * Stream without waiting for ack (response to media-request).
+   * @param {string} peerId
+   * @param {string} mediaId
+   * @param {MediaEntry} entry
+   */
+  async _streamMediaTo(peerId, mediaId, entry) {
+    const chunks = await blobToBase64Chunks(entry.blob);
+    this._send(
+      encodeFrame("media-offer", {
+        mediaId,
+        mime: entry.mime,
+        size: entry.size,
+        width: entry.width,
+        height: entry.height,
+        chatId: entry.chatId,
+        dmId: entry.dmId,
+      }),
+      peerId,
+    );
+    for (let index = 0; index < chunks.length; index++) {
+      this._send(
+        encodeFrame("media-chunk", {
+          mediaId,
+          index,
+          total: chunks.length,
+          data: chunks[index],
+        }),
+        peerId,
+      );
+    }
+    this._send(encodeFrame("media-complete", { mediaId }), peerId);
+  }
+
+  /**
+   * @param {string} mediaId
+   * @param {number} [timeoutMs]
+   * @returns {Promise<boolean>}
+   */
+  _waitUploadAck(mediaId, timeoutMs = 60_000) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this._uploadWaiters.delete(mediaId);
+        reject(new Error("Media transfer timeout"));
+      }, timeoutMs);
+      this._uploadWaiters.set(mediaId, {
+        resolve: (v) => {
+          clearTimeout(timer);
+          resolve(v);
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+      });
+    });
+  }
+
   /**
    * @param {string} [targetPeerId]
    */

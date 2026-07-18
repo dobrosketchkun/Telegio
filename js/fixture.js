@@ -7,6 +7,7 @@ import {
 } from "./engine.js";
 import { parseMarkdownLite } from "./entities.js";
 import { dmIdFor } from "./ids.js";
+import { makeFixtureImage, mintMediaId } from "./media.js";
 
 const PEERS = {
   host: {
@@ -40,11 +41,16 @@ const PEERS = {
 };
 
 /**
- * Build a fixture session with Phase 2–3 chrome samples.
+ * Build a fixture session with Phase 2–4 chrome samples.
  * @param {{ name: string, stickers?: { id: string }[] } | null} [pack]
- * @returns {{ selfPeerId: string, hostState: import("./engine.js").HostState, dmState: import("./engine.js").DmState }}
+ * @returns {Promise<{
+ *   selfPeerId: string,
+ *   hostState: import("./engine.js").HostState,
+ *   dmState: import("./engine.js").DmState,
+ *   media: Map<string, { blob: Blob, mime: string, size: number, width?: number, height?: number, senderPeerId: string }>,
+ * }>}
  */
-export function buildFixture(pack = null) {
+export async function buildFixture(pack = null) {
   let hostState = createHostState({
     sessionId: "fixture01",
     title: "Fixture session",
@@ -172,7 +178,7 @@ export function buildFixture(pack = null) {
     {
       type: "send-text",
       chatId: notesId,
-      text: "Phase 3 fixture: stickers + reply / spoiler / edit",
+      text: "Phase 4 fixture: stickers + photos + albums",
     },
     { actorPeerId: PEERS.mira.peerId },
   );
@@ -262,10 +268,77 @@ export function buildFixture(pack = null) {
   if (!dr.ok) throw new Error(dr.error);
   dmState = dr.state;
 
+  /** @type {Map<string, { blob: Blob, mime: string, size: number, width?: number, height?: number, senderPeerId: string }>} */
+  const media = new Map();
+
+  const imgA = await makeFixtureImage("Photo A", "#3a7bd5");
+  const imgB = await makeFixtureImage("Photo B", "#c94b4b");
+  const imgC = await makeFixtureImage("Album C", "#2d8f5f");
+  const imgDm = await makeFixtureImage("DM pic", "#8e44ad");
+
+  const midA = mintMediaId();
+  const midB = mintMediaId();
+  const midC = mintMediaId();
+  const midDm = mintMediaId();
+
+  media.set(midA, {
+    ...imgA,
+    senderPeerId: PEERS.mira.peerId,
+  });
+  media.set(midB, {
+    ...imgB,
+    senderPeerId: PEERS.self.peerId,
+  });
+  media.set(midC, {
+    ...imgC,
+    senderPeerId: PEERS.self.peerId,
+  });
+  media.set(midDm, {
+    ...imgDm,
+    senderPeerId: PEERS.self.peerId,
+  });
+
+  r = applyHost(
+    hostState,
+    {
+      type: "send-media",
+      chatId: groupId,
+      mediaIds: [midA],
+      text: "Look at this photo",
+    },
+    { actorPeerId: PEERS.mira.peerId },
+  );
+  if (!r.ok) throw new Error(r.error);
+  hostState = r.state;
+
+  r = applyHost(
+    hostState,
+    {
+      type: "send-media",
+      chatId: groupId,
+      mediaIds: [midB, midC],
+      text: "Album sample",
+      replyTo: miraMsgId,
+    },
+    { actorPeerId: PEERS.self.peerId },
+  );
+  if (!r.ok) throw new Error(r.error);
+  hostState = r.state;
+
+  dr = applyDm(dmState, PEERS.self.peerId, {
+    type: "dm-send-media",
+    dmId,
+    mediaIds: [midDm],
+    text: "private pic",
+  });
+  if (!dr.ok) throw new Error(dr.error);
+  dmState = dr.state;
+
   return {
     selfPeerId: PEERS.self.peerId,
     hostState,
     dmState,
+    media,
   };
 }
 

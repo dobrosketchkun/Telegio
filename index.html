@@ -74,7 +74,11 @@
             <button type="button" class="btn btn--danger" id="edit-bar-clear">Cancel</button>
           </div>
           <div class="picker" id="picker" hidden></div>
+          <div class="attach-pending" id="attach-pending" hidden></div>
+          <p class="upload-status" id="upload-status" hidden></p>
           <form class="compose" id="compose-form">
+            <button type="button" class="compose__attach" id="attach-btn" aria-label="Attach photos" title="Attach photos">+</button>
+            <input type="file" id="attach-input" accept="image/*" multiple hidden />
             <textarea
               class="compose__input"
               id="compose-input"
@@ -89,9 +93,13 @@
               </svg>
             </button>
           </form>
-          <p class="compose-hint">*bold* _italic_ ~strike~ `code` ||spoiler||</p>
+          <p class="compose-hint">*bold* _italic_ ~strike~ `code` ||spoiler|| · attach photos with +</p>
         </div>
       </section>
+    </div>
+
+    <div class="lightbox" id="lightbox" hidden>
+      <img id="lightbox-img" alt="" />
     </div>
 
     <div id="modal" class="modal" hidden>

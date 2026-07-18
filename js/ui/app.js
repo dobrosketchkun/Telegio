@@ -8,11 +8,13 @@ import {
   listChatsForUi,
 } from "../engine.js";
 import { parseMarkdownLite, toMarkdownLite } from "../entities.js";
+import { MAX_ALBUM_ITEMS } from "../constants.js";
 import { buildFixture } from "../fixture.js";
 import { isFixtureMode, readJoinSessionId } from "../invite.js";
+import { log } from "../log.js";
+import { compressImage, mintMediaId } from "../media.js";
 import { selfCheckEnvelope } from "../protocol.js";
 import { ChatSession } from "../session.js";
-import { log } from "../log.js";
 import { ensureFixturePacks } from "../stickers.js";
 import { addPacksFromText, createPicker } from "./picker.js";
 import { renderChatList, renderThread } from "./render.js";
@@ -55,14 +57,24 @@ const els = {
   jumpFab: document.querySelector("#jump-fab"),
   picker: document.querySelector("#picker"),
   pickerToggle: document.querySelector("#picker-toggle"),
+  attachBtn: document.querySelector("#attach-btn"),
+  attachInput: document.querySelector("#attach-input"),
+  attachPending: document.querySelector("#attach-pending"),
+  uploadStatus: document.querySelector("#upload-status"),
+  lightbox: document.querySelector("#lightbox"),
+  lightboxImg: document.querySelector("#lightbox-img"),
 };
 
 /** @type {"fixture" | "online" | null} */
 let mode = null;
 /** @type {ChatSession | null} */
 let session = null;
-/** @type {{ selfPeerId: string, hostState: import("../engine.js").HostState, dmState: import("../engine.js").DmState } | null} */
+/** @type {{ selfPeerId: string, hostState: import("../engine.js").HostState, dmState: import("../engine.js").DmState, media?: Map<string, import("../session.js").MediaEntry | { blob: Blob, mime: string, size: number, width?: number, height?: number, senderPeerId: string, objectUrl?: string }> } | null} */
 let fixtureStore = null;
+/** @type {{ file: File, url: string }[]} */
+let pendingFiles = [];
+/** @type {boolean} */
+let sendingMedia = false;
 /** @type {string | null} */
 let activeChatId = null;
 /** @type {null | (() => void)} */
@@ -81,7 +93,7 @@ log("boot", {
   href: location.href,
   joinId,
   fixture: isFixtureMode(),
-  build: "phase3+conn-debug",
+  build: "phase4-media",
 });
 
 const picker = createPicker(els.picker, {
@@ -169,7 +181,13 @@ function setReply(messageId) {
       ? "You"
       : sender?.displayName || msg.senderPeerId || "Message";
   els.replyBarText.textContent =
-    msg.kind === "sticker" ? "Sticker" : msg.text || "";
+    msg.kind === "sticker"
+      ? "Sticker"
+      : msg.kind === "media"
+        ? msg.text?.trim() || "Photo"
+        : msg.kind === "album"
+          ? msg.text?.trim() || "Album"
+          : msg.text || "";
   els.replyBar.hidden = false;
   els.composeInput.focus();
 }
@@ -314,12 +332,22 @@ function paint() {
       },
       onReply: (messageId) => setReply(messageId),
       onEdit: (messageId) => setEdit(messageId),
+      getMediaUrl: (mediaId) => resolveMediaUrl(mediaId),
+      onOpenMedia: (url) => openLightbox(url),
     },
   );
 
-  const canSend = Boolean(thread) && !ended;
+  // Pull missing group media while viewing
+  if (mode === "online" && session && thread?.kind === "group") {
+    for (const msg of thread.messages) {
+      if (msg.mediaIds?.length) session.ensureMedia(msg.mediaIds);
+    }
+  }
+
+  const canSend = Boolean(thread) && !ended && !sendingMedia;
   els.composeInput.disabled = !canSend;
   els.composeSend.disabled = !canSend;
+  if (els.attachBtn) els.attachBtn.disabled = !canSend;
   els.btnNewDm.disabled = ended || !store.hostState.roster.length;
   els.btnNewGroup.disabled = ended || store.hostState.roster.length < 2;
 
@@ -344,9 +372,9 @@ function enterAppShell({ badge, status, inviteUrl }) {
 
 async function startFixture() {
   mode = "fixture";
-  enterAppShell({ badge: "Fixture", status: "Loading stickers…" });
+  enterAppShell({ badge: "Fixture", status: "Loading fixture…" });
   const pack = await ensureFixturePacks();
-  fixtureStore = buildFixture(pack);
+  fixtureStore = await buildFixture(pack);
   const privacy = assertHostExcludesDms(
     fixtureStore.hostState,
     fixtureStore.dmState,
@@ -357,6 +385,7 @@ async function startFixture() {
       envOk ? "envelope mode=none ok" : "envelope FAIL",
       privacy.ok ? "host snapshot excludes DMs" : privacy.error,
       `pack ${pack.name}`,
+      `media ${fixtureStore.media?.size || 0}`,
     ].join(" · "),
     envOk && privacy.ok,
   );
@@ -643,7 +672,203 @@ function openNewGroupModal() {
   );
 }
 
-function sendOrSave() {
+function resolveMediaUrl(mediaId) {
+  if (mode === "online" && session) {
+    return session.getMediaUrl(mediaId);
+  }
+  if (mode === "fixture" && fixtureStore?.media) {
+    const entry = fixtureStore.media.get(mediaId);
+    if (!entry?.blob) return null;
+    if (!entry.objectUrl) entry.objectUrl = URL.createObjectURL(entry.blob);
+    return entry.objectUrl;
+  }
+  return null;
+}
+
+function openLightbox(url) {
+  if (!els.lightbox || !els.lightboxImg || !url) return;
+  els.lightboxImg.src = url;
+  els.lightbox.hidden = false;
+}
+
+function closeLightbox() {
+  if (!els.lightbox || !els.lightboxImg) return;
+  els.lightbox.hidden = true;
+  els.lightboxImg.removeAttribute("src");
+}
+
+function setUploadStatus(text) {
+  if (!els.uploadStatus) return;
+  if (!text) {
+    els.uploadStatus.hidden = true;
+    els.uploadStatus.textContent = "";
+    return;
+  }
+  els.uploadStatus.hidden = false;
+  els.uploadStatus.textContent = text;
+}
+
+function clearPendingFiles() {
+  for (const p of pendingFiles) URL.revokeObjectURL(p.url);
+  pendingFiles = [];
+  renderPendingStrip();
+}
+
+function renderPendingStrip() {
+  if (!els.attachPending) return;
+  els.attachPending.innerHTML = "";
+  if (!pendingFiles.length) {
+    els.attachPending.hidden = true;
+    return;
+  }
+  els.attachPending.hidden = false;
+  for (const p of pendingFiles) {
+    const wrap = document.createElement("div");
+    wrap.className = "attach-pending__thumb";
+    const img = document.createElement("img");
+    img.src = p.url;
+    img.alt = "";
+    wrap.append(img);
+    els.attachPending.append(wrap);
+  }
+  const clear = document.createElement("button");
+  clear.type = "button";
+  clear.className = "btn btn--small attach-pending__clear";
+  clear.textContent = "Clear";
+  clear.addEventListener("click", clearPendingFiles);
+  els.attachPending.append(clear);
+}
+
+/**
+ * @param {FileList | File[]} list
+ */
+function addPendingFiles(list) {
+  const files = [...list].filter((f) => f.type.startsWith("image/"));
+  const room = MAX_ALBUM_ITEMS - pendingFiles.length;
+  if (room <= 0) {
+    showBanner(`Max ${MAX_ALBUM_ITEMS} photos`, false);
+    return;
+  }
+  for (const file of files.slice(0, room)) {
+    pendingFiles.push({ file, url: URL.createObjectURL(file) });
+  }
+  if (files.length > room) {
+    showBanner(`Max ${MAX_ALBUM_ITEMS} photos — extra ignored`, false);
+  }
+  renderPendingStrip();
+}
+
+async function sendPendingMedia() {
+  if (!activeChatId || !pendingFiles.length || sendingMedia) return;
+  const store = getStore();
+  if (!store) return;
+  const thread = getChatThread(
+    store.hostState,
+    store.dmState,
+    activeChatId,
+  );
+  if (!thread) return;
+
+  const captionRaw = els.composeInput.value;
+  const parsed = captionRaw.trim()
+    ? parseMarkdownLite(captionRaw)
+    : { text: "", entities: [] };
+  const files = pendingFiles.map((p) => p.file);
+  const replyTo = replyToId || undefined;
+
+  sendingMedia = true;
+  paint();
+  try {
+    if (mode === "fixture" && fixtureStore) {
+      setUploadStatus("Preparing photos…");
+      if (!fixtureStore.media) fixtureStore.media = new Map();
+      /** @type {string[]} */
+      const mediaIds = [];
+      let i = 0;
+      for (const file of files) {
+        i += 1;
+        setUploadStatus(`Compressing ${i}/${files.length}…`);
+        const compressed = await compressImage(file);
+        const id = mintMediaId();
+        fixtureStore.media.set(id, {
+          blob: compressed.blob,
+          mime: compressed.mime,
+          size: compressed.size,
+          width: compressed.width,
+          height: compressed.height,
+          senderPeerId: fixtureStore.selfPeerId,
+        });
+        mediaIds.push(id);
+      }
+      if (thread.kind === "group") {
+        const r = applyHost(
+          fixtureStore.hostState,
+          {
+            type: "send-media",
+            chatId: activeChatId,
+            mediaIds,
+            text: parsed.text || undefined,
+            entities: parsed.entities.length ? parsed.entities : undefined,
+            replyTo,
+          },
+          { actorPeerId: fixtureStore.selfPeerId },
+        );
+        if (!r.ok) throw new Error(r.error || "Send failed");
+        fixtureStore = { ...fixtureStore, hostState: r.state, media: fixtureStore.media };
+      } else {
+        const r = applyDm(fixtureStore.dmState, fixtureStore.selfPeerId, {
+          type: "dm-send-media",
+          dmId: activeChatId,
+          mediaIds,
+          text: parsed.text || undefined,
+          entities: parsed.entities.length ? parsed.entities : undefined,
+          replyTo,
+        });
+        if (!r.ok) throw new Error(r.error || "Send failed");
+        fixtureStore = { ...fixtureStore, dmState: r.state, media: fixtureStore.media };
+      }
+    } else if (session && !session.sessionEnded) {
+      if (thread.kind === "group") {
+        const mediaIds = await session.uploadGroupMedia(files, {
+          chatId: activeChatId,
+          onProgress: setUploadStatus,
+        });
+        setUploadStatus("Sending…");
+        session.sendGroupMedia(activeChatId, {
+          mediaIds,
+          text: parsed.text || undefined,
+          entities: parsed.entities.length ? parsed.entities : undefined,
+          replyTo,
+        });
+      } else {
+        await session.sendDmMedia(activeChatId, files, {
+          text: parsed.text || undefined,
+          entities: parsed.entities.length ? parsed.entities : undefined,
+          replyTo,
+          onProgress: setUploadStatus,
+        });
+      }
+    } else {
+      throw new Error("Not connected");
+    }
+    els.composeInput.value = "";
+    clearPendingFiles();
+    clearReply();
+  } catch (e) {
+    showBanner(e?.message || String(e), false);
+  } finally {
+    sendingMedia = false;
+    setUploadStatus("");
+    paint();
+  }
+}
+
+async function sendOrSave() {
+  if (pendingFiles.length) {
+    await sendPendingMedia();
+    return;
+  }
+
   const raw = els.composeInput.value;
   if (!raw.trim() || !activeChatId) return;
   const store = getStore();
@@ -745,9 +970,9 @@ function sendOrSave() {
   clearReply();
 }
 
-els.composeForm.addEventListener("submit", (e) => {
+els.composeForm.addEventListener("submit", async (e) => {
   e.preventDefault();
-  sendOrSave();
+  await sendOrSave();
   els.composeInput.focus();
 });
 
@@ -756,6 +981,19 @@ els.composeInput.addEventListener("keydown", (e) => {
     e.preventDefault();
     els.composeForm.requestSubmit();
   }
+});
+
+els.attachBtn?.addEventListener("click", () => els.attachInput?.click());
+els.attachInput?.addEventListener("change", () => {
+  if (els.attachInput?.files?.length) {
+    addPendingFiles(els.attachInput.files);
+    els.attachInput.value = "";
+  }
+});
+
+els.lightbox?.addEventListener("click", () => closeLightbox());
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeLightbox();
 });
 
 els.messages?.addEventListener("scroll", updateJumpFab);
