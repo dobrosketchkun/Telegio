@@ -1,7 +1,6 @@
 import {
   APP_ID,
   APP_VERSION,
-  HOST_MEDIA_BUDGET_BYTES,
   MAX_ALBUM_ITEMS,
   MEDIA_CHUNK_BYTES,
   MEDIA_TURN_HINT,
@@ -94,16 +93,10 @@ export class ChatSession {
     this._pendingDisplayName = "";
     /** @type {string} */
     this._sessionId = "";
-    /** @type {Map<string, MediaEntry>} host group media store */
-    this.mediaStore = new Map();
-    /** @type {Map<string, MediaEntry>} blobs this peer can render */
+    /** @type {Map<string, MediaEntry>} blobs this peer holds (own sends + P2P downloads) */
     this.localMedia = new Map();
-    /** @type {number} */
-    this.hostMediaBytes = 0;
     /** @type {Map<string, { meta: object, chunks: string[], from: string }>} */
     this._incoming = new Map();
-    /** @type {Map<string, { resolve: (v: boolean) => void, reject: (e: Error) => void }>} */
-    this._uploadWaiters = new Map();
     /** @type {Set<string>} */
     this._fetching = new Set();
     /** @type {Map<string, { size: number, mime?: string, duration?: number, senderPeerId?: string, thumbDataUrl?: string }>} */
@@ -117,17 +110,11 @@ export class ChatSession {
    * @returns {string | null} object URL
    */
   getMediaUrl(mediaId) {
-    const entry = this.localMedia.get(mediaId) || this.mediaStore.get(mediaId);
+    const entry = this.localMedia.get(mediaId);
     if (!entry?.blob) return null;
     if (!entry.objectUrl) {
       entry.objectUrl = URL.createObjectURL(entry.blob);
-      if (this.localMedia.has(mediaId)) {
-        this.localMedia.set(mediaId, entry);
-      } else if (this.mediaStore.has(mediaId)) {
-        this.mediaStore.set(mediaId, entry);
-      } else {
-        this.localMedia.set(mediaId, entry);
-      }
+      this.localMedia.set(mediaId, entry);
     }
     return entry.objectUrl;
   }
@@ -159,7 +146,7 @@ export class ChatSession {
 
   /** @param {string} mediaId @returns {MediaEntry | undefined} */
   getMediaEntry(mediaId) {
-    return this.localMedia.get(mediaId) || this.mediaStore.get(mediaId);
+    return this.localMedia.get(mediaId);
   }
 
   /** @param {string} mediaId */
@@ -434,17 +421,16 @@ export class ChatSession {
   }
 
   /**
-   * Compress/prepare + upload images or small videos to host.
-   * Videos over VIDEO_AUTO_DOWNLOAD_BYTES stay on the sender until Download —
-   * only a tiny poster frame rides with the chat message.
+   * Prepare group media on the sender only. Bytes stay local; roster peers pull
+   * via media-request → senderPeerId. Host gets message metadata only (not bytes).
+   * Videos over VIDEO_AUTO_DOWNLOAD_BYTES also get a tiny poster thumb in mediaInfo.
    * @param {Blob[]} files
    * @param {{ chatId?: string, onProgress?: (label: string) => void }} [opts]
    * @returns {Promise<{ mediaIds: string[], mediaKind?: "video", mediaInfo?: object[] }>}
    */
-  async uploadGroupMedia(files, opts = {}) {
+  async prepareGroupMedia(files, opts = {}) {
+    if (!this.hostState) throw new Error("No session");
     const batch = classifyMediaBatch(files);
-    const hostId = this.hostState ? getHostPeerId(this.hostState) : null;
-    if (!hostId) throw new Error("No host");
 
     /** @type {string[]} */
     const mediaIds = [];
@@ -477,30 +463,12 @@ export class ChatSession {
       if (deferred) {
         opts.onProgress?.("Making thumbnail…");
         thumbDataUrl = await captureVideoThumbDataUrl(prepared.blob);
-        // Keep bytes on sender only — no host upload of the full video.
-        this.putLocalMedia(mediaId, entry);
-        this.unlockMedia(mediaId);
-        if (this.role === "host") {
-          // Host already has the file locally; register for later peer downloads.
-          const ok = this._hostAcceptMedia(mediaId, entry);
-          if (!ok) throw new Error("Host media budget exceeded");
-        }
-        opts.onProgress?.("Posting…");
-      } else if (this.role === "host") {
-        const ok = this._hostAcceptMedia(mediaId, entry);
-        if (!ok) throw new Error("Host media budget exceeded");
-        this.unlockMedia(mediaId);
-      } else {
-        opts.onProgress?.(
-          `Uploading ${formatBytes(prepared.size)} (${i}/${batch.files.length})…`,
-        );
-        await this._transferMediaTo(hostId, mediaId, entry, {
-          chatId: opts.chatId,
-          onProgress: opts.onProgress,
-        });
-        this.putLocalMedia(mediaId, entry);
-        this.unlockMedia(mediaId);
       }
+      // Sender keeps the bytes; peers fetch via media-request → senderPeerId.
+      this.putLocalMedia(mediaId, entry);
+      this.unlockMedia(mediaId);
+      opts.onProgress?.("Posting…");
+
       mediaIds.push(mediaId);
       this._mediaMeta.set(mediaId, {
         size: prepared.size,
@@ -542,7 +510,7 @@ export class ChatSession {
   }
 
   /**
-   * Compress/prepare, P2P transfer to DM peer, then dm-send-media.
+   * Prepare DM media on the sender only; peer pulls via media-request (same as groups).
    * @param {string} dmId
    * @param {Blob[]} files
    * @param {{ text?: string, entities?: object[], replyTo?: string, onProgress?: (label: string) => void }} [opts]
@@ -585,16 +553,8 @@ export class ChatSession {
       if (deferred) {
         opts.onProgress?.("Making thumbnail…");
         thumbDataUrl = await captureVideoThumbDataUrl(prepared.blob);
-        opts.onProgress?.("Posting…");
-      } else {
-        opts.onProgress?.(
-          `Sending ${formatBytes(prepared.size)} (${i}/${batch.files.length})…`,
-        );
-        await this._transferMediaTo(other, mediaId, entry, {
-          dmId,
-          onProgress: opts.onProgress,
-        });
       }
+      opts.onProgress?.("Posting…");
       mediaIds.push(mediaId);
       this._mediaMeta.set(mediaId, {
         size: prepared.size,
@@ -671,15 +631,13 @@ export class ChatSession {
   }
 
   /**
-   * Request any missing media ids.
-   * Videos larger than VIDEO_AUTO_DOWNLOAD_BYTES are skipped unless force —
-   * then fetched from the original sender (not uploaded at post time).
+   * Pull missing media P2P from the original sender (roster peer).
+   * Host is not a media CDN — only roster/admin + message relay.
+   * Large videos skip until force (Download tap).
    * @param {string[]} mediaIds
    * @param {{ force?: boolean, sizes?: Record<string, number>, mimes?: Record<string, string>, senders?: Record<string, string> }} [opts]
    */
   ensureMedia(mediaIds, opts = {}) {
-    if (!this.hostState && !opts.senders) return;
-    const hostId = this.hostState ? getHostPeerId(this.hostState) : null;
     for (const id of mediaIds || []) {
       if (!id) continue;
       if (opts.force) this.unlockMedia(id);
@@ -694,7 +652,6 @@ export class ChatSession {
         isDeferredVideoSize(knownSize) &&
         !opts.force &&
         !this._mediaUnlocked.has(id);
-      // Large videos: recipients must tap Download (unless force / already unlocked).
       if (largeLocked) {
         log("media", "skip auto-download (large)", id, knownSize);
         continue;
@@ -703,30 +660,28 @@ export class ChatSession {
         if (opts.force) this.hooks.onChange();
         continue;
       }
-      if (this.mediaStore.has(id)) {
-        this.putLocalMedia(id, this.mediaStore.get(id));
-        this.unlockMedia(id);
-        this.hooks.onChange();
-        continue;
-      }
       if (this._fetching.has(id)) continue;
 
-      // Large / deferred videos live on the sender until Download.
-      const target =
-        isVideo && isDeferredVideoSize(knownSize) && senderPeerId
-          ? senderPeerId
-          : hostId;
+      const target = senderPeerId;
       if (!target || target === this.selfPeerId) {
         if (opts.force) {
           this.hooks.onError(
-            "Video is only on the sender’s device — they may be offline.",
+            "Media is only on the sender’s device — they may be offline.",
+          );
+        }
+        continue;
+      }
+      if (!this.connectedPeers.has(target)) {
+        if (opts.force) {
+          this.hooks.onError(
+            "Sender is offline — cannot download media right now.",
           );
         }
         continue;
       }
 
       this._fetching.add(id);
-      log("media", "request", id, "→", target);
+      log("media", "request P2P", id, "→", target);
       this._send(encodeFrame("media-request", { mediaId: id }), target);
     }
   }
@@ -1263,7 +1218,23 @@ export class ChatSession {
       );
       if (r.ok) {
         this.dmState = r.state;
-        if (r.message) this.rememberMediaInfo(r.message);
+        const msg = r.message || body.message;
+        if (msg) {
+          this.rememberMediaInfo(msg);
+          if (msg.mediaIds?.length) {
+            const sizes = Object.create(null);
+            const mimes = Object.create(null);
+            const senders = Object.create(null);
+            msg.mediaIds.forEach((id, i) => {
+              const sz = msg.mediaInfo?.[i]?.size;
+              if (sz != null) sizes[id] = sz;
+              const mime = msg.mediaInfo?.[i]?.mime;
+              if (mime) mimes[id] = mime;
+              senders[id] = msg.senderPeerId || peerId;
+            });
+            this.ensureMedia(msg.mediaIds, { sizes, mimes, senders });
+          }
+        }
         if (body.message?.id || r.message?.id) {
           const id = body.message?.id || r.message.id;
           this._send(
@@ -1342,34 +1313,38 @@ export class ChatSession {
 
   /**
    * After host applies effects locally, ack messages where we are a non-sender member.
+   * Media bytes are fetched P2P only if we are a group member (host admin of other
+   * groups must not pull every group's media just because they see the events).
    * @param {import("./engine.js").Effect[]} effects
    */
   _ackFromEffects(effects) {
     for (const effect of effects) {
       if (effect.event === "message-added" && effect.message) {
-        this._ackGroupMessage(
-          effect.chatId || effect.message.chatId,
-          effect.message,
-        );
+        const chatId = effect.chatId || effect.message.chatId;
+        this._ackGroupMessage(chatId, effect.message);
         this.rememberMediaInfo(effect.message);
-        if (effect.message.mediaIds?.length) {
-          const sizes = Object.create(null);
-          const mimes = Object.create(null);
-          const senders = Object.create(null);
-          effect.message.mediaIds.forEach((id, i) => {
-            const sz = effect.message.mediaInfo?.[i]?.size;
-            if (sz != null) sizes[id] = sz;
-            const mime = effect.message.mediaInfo?.[i]?.mime;
-            if (mime) mimes[id] = mime;
-            if (effect.message.senderPeerId) {
-              senders[id] = effect.message.senderPeerId;
-            }
-          });
-          if (effect.message.senderPeerId === this.selfPeerId) {
-            effect.message.mediaIds.forEach((id) => this.unlockMedia(id));
+        if (!effect.message.mediaIds?.length) continue;
+        const chat = chatId ? this.hostState?.groups[chatId] : null;
+        const member = Boolean(
+          chat?.memberPeerIds?.includes(this.selfPeerId),
+        );
+        if (!member) continue;
+        const sizes = Object.create(null);
+        const mimes = Object.create(null);
+        const senders = Object.create(null);
+        effect.message.mediaIds.forEach((id, i) => {
+          const sz = effect.message.mediaInfo?.[i]?.size;
+          if (sz != null) sizes[id] = sz;
+          const mime = effect.message.mediaInfo?.[i]?.mime;
+          if (mime) mimes[id] = mime;
+          if (effect.message.senderPeerId) {
+            senders[id] = effect.message.senderPeerId;
           }
-          this.ensureMedia(effect.message.mediaIds, { sizes, mimes, senders });
+        });
+        if (effect.message.senderPeerId === this.selfPeerId) {
+          effect.message.mediaIds.forEach((id) => this.unlockMedia(id));
         }
+        this.ensureMedia(effect.message.mediaIds, { sizes, mimes, senders });
       }
     }
   }
@@ -1456,15 +1431,18 @@ export class ChatSession {
     if (!mediaId && type !== "media-request") return;
 
     if (type === "media-offer") {
+      // Pull-only: accept offers only after we media-request'd (group or DM).
+      // Rejects legacy guest→host pushes and unsolicited DM blasts.
+      if (!this._fetching.has(mediaId) && !this._incoming.has(mediaId)) {
+        warn("media", "ignore unsolicited offer", mediaId, "from", peerId);
+        return;
+      }
       if (body.dmId) {
         const expected = dmIdFor(this.selfPeerId, peerId);
         if (body.dmId !== expected) {
           warn("media", "ignore DM offer for other pair", body.dmId);
           return;
         }
-      } else if (this.role !== "host") {
-        // Guests only accept offers when fetching (host→guest) or DM.
-        // Group uploads are host-only; ignore peer→guest group offers.
       }
       const total = Number(body.total);
       log("media", "offer", mediaId, {
@@ -1473,10 +1451,17 @@ export class ChatSession {
         from: peerId,
         dm: Boolean(body.dmId),
       });
+      const prevMeta = this._mediaMeta.get(mediaId) || {};
       this._mediaMeta.set(mediaId, {
-        size: Number(body.size) || 0,
-        mime: body.mime,
-        duration: body.duration != null ? Number(body.duration) : undefined,
+        ...prevMeta,
+        size: Number(body.size) || prevMeta.size || 0,
+        mime: body.mime || prevMeta.mime,
+        duration:
+          body.duration != null
+            ? Number(body.duration)
+            : prevMeta.duration,
+        // Holder of the bytes (usually original sender).
+        senderPeerId: prevMeta.senderPeerId || peerId,
       });
       const prev = this._incoming.get(mediaId);
       if (prev?.assembleTimer != null) clearTimeout(prev.assembleTimer);
@@ -1505,18 +1490,15 @@ export class ChatSession {
     }
 
     if (type === "media-complete") {
-      // Ack from receiver → resolve uploader waiter
+      // Receiver→sender ack after assemble (pull model; no upload waiter).
       if (typeof body.ok === "boolean") {
-        const waiter = this._uploadWaiters.get(mediaId);
-        if (waiter) {
-          this._uploadWaiters.delete(mediaId);
-          if (body.ok) waiter.resolve(true);
-          else waiter.reject(new Error(body.reason || "Media rejected"));
+        if (!body.ok) {
+          warn("media", "peer rejected transfer", mediaId, body.reason);
         }
         return;
       }
 
-      // Uploader finished sending chunks → assemble when all chunks present
+      // Sender finished streaming chunks → assemble when all chunks present
       const inc = this._incoming.get(mediaId);
       if (!inc) return;
       inc.completeSignaled = true;
@@ -1535,7 +1517,7 @@ export class ChatSession {
 
     if (type === "media-request") {
       const id = mediaId || String(body.mediaId || "").trim();
-      const entry = this.mediaStore.get(id) || this.localMedia.get(id);
+      const entry = this.localMedia.get(id);
       if (!entry) {
         this._send(
           encodeFrame("media-reject", { mediaId: id, reason: "Unknown media" }),
@@ -1543,7 +1525,7 @@ export class ChatSession {
         );
         return;
       }
-      log("media", "serve request", id, "→", peerId);
+      log("media", "serve P2P", id, "→", peerId);
       this._streamMediaTo(peerId, id, entry).catch((err) =>
         logError("media", "stream failed", err),
       );
@@ -1551,44 +1533,11 @@ export class ChatSession {
     }
 
     if (type === "media-reject") {
-      const waiter = this._uploadWaiters.get(mediaId);
       const reason = body.reason || "Media rejected";
-      if (waiter) {
-        this._uploadWaiters.delete(mediaId);
-        waiter.reject(new Error(reason));
-      }
       this._fetching.delete(mediaId);
       warn("media", "rejected", mediaId, reason);
       this.hooks.onError(`${reason}. ${MEDIA_TURN_HINT}`);
     }
-  }
-
-  /**
-   * @param {string} mediaId
-   * @param {MediaEntry} entry
-   * @returns {boolean}
-   */
-  _hostAcceptMedia(mediaId, entry) {
-    if (this.mediaStore.has(mediaId)) {
-      this.putLocalMedia(mediaId, entry);
-      return true;
-    }
-    if (this.hostMediaBytes + entry.size > HOST_MEDIA_BUDGET_BYTES) {
-      warn("media", "budget exceeded", {
-        have: this.hostMediaBytes,
-        need: entry.size,
-        budget: HOST_MEDIA_BUDGET_BYTES,
-      });
-      return false;
-    }
-    this.mediaStore.set(mediaId, entry);
-    this.hostMediaBytes += entry.size;
-    this.putLocalMedia(mediaId, entry);
-    log("media", "host stored", mediaId, {
-      bytes: this.hostMediaBytes,
-      budget: HOST_MEDIA_BUDGET_BYTES,
-    });
-    return true;
   }
 
   /**
@@ -1640,33 +1589,22 @@ export class ChatSession {
         dmId: inc.meta.dmId,
       };
 
+      // Any peer (including host) keeps a local copy only — no session-wide media CDN.
+      this.putLocalMedia(mediaId, entry);
+      this._fetching.delete(mediaId);
       if (inc.meta.dmId) {
-        this.putLocalMedia(mediaId, entry);
-        // Keep large DM videos locked until the peer taps Download.
         const largeVideo =
           String(entry.mime || "")
             .toLowerCase()
             .startsWith("video/") &&
           entry.size > VIDEO_AUTO_DOWNLOAD_BYTES;
         if (!largeVideo) this.unlockMedia(mediaId);
-      } else if (this.role === "host") {
-        const ok = this._hostAcceptMedia(mediaId, entry);
-        if (!ok) {
-          this._incoming.delete(mediaId);
-          this._send(
-            encodeFrame("media-complete", {
-              mediaId,
-              ok: false,
-              reason: "Host media budget exceeded",
-            }),
-            peerId,
-          );
-          return true;
-        }
       } else {
-        this.putLocalMedia(mediaId, entry);
-        this.unlockMedia(mediaId);
-        this._fetching.delete(mediaId);
+        const largeVideo =
+          String(entry.mime || "")
+            .toLowerCase()
+            .startsWith("video/") && isDeferredVideoSize(entry.size);
+        if (!largeVideo) this.unlockMedia(mediaId);
       }
 
       this._incoming.delete(mediaId);
@@ -1743,7 +1681,7 @@ export class ChatSession {
         const sent = Math.min(offset + MEDIA_CHUNK_BYTES, blob.size);
         const pct = Math.min(100, Math.round(((index + 1) / total) * 100));
         opts.onProgress?.(
-          `Uploading ${pct}% · ${formatBytes(sent)} / ${formatBytes(blob.size)}`,
+          `Sending ${pct}% · ${formatBytes(sent)} / ${formatBytes(blob.size)}`,
         );
       }
       if ((index + 1) % 8 === 0) {
@@ -1756,46 +1694,7 @@ export class ChatSession {
   }
 
   /**
-   * @param {string} peerId
-   * @param {string} mediaId
-   * @param {MediaEntry} entry
-   * @param {{ chatId?: string, dmId?: string, onProgress?: (label: string) => void }} [scope]
-   */
-  async _transferMediaTo(peerId, mediaId, entry, scope = {}) {
-    const total = mediaChunkCount(entry.blob.size, MEDIA_CHUNK_BYTES);
-    const ack = this._waitUploadAck(
-      mediaId,
-      Math.max(120_000, total * 80 + entry.blob.size / 50),
-    );
-    await this._sendMediaChunks(
-      peerId,
-      mediaId,
-      entry.blob,
-      {
-        mime: entry.mime,
-        size: entry.size,
-        width: entry.width,
-        height: entry.height,
-        duration: entry.duration,
-        chatId: scope.chatId,
-        dmId: scope.dmId,
-      },
-      { onProgress: scope.onProgress },
-    );
-    try {
-      await ack;
-    } catch (e) {
-      const msg = e?.message || String(e);
-      throw new Error(
-        /timeout|reject|mismatch|incomplete/i.test(msg)
-          ? `${msg}. ${MEDIA_TURN_HINT}`
-          : msg,
-      );
-    }
-  }
-
-  /**
-   * Stream without waiting for ack (response to media-request).
+   * Stream local bytes to a peer that media-request'd them (P2P pull).
    * @param {string} peerId
    * @param {string} mediaId
    * @param {MediaEntry} entry
@@ -1809,30 +1708,6 @@ export class ChatSession {
       duration: entry.duration,
       chatId: entry.chatId,
       dmId: entry.dmId,
-    });
-  }
-
-  /**
-   * @param {string} mediaId
-   * @param {number} [timeoutMs]
-   * @returns {Promise<boolean>}
-   */
-  _waitUploadAck(mediaId, timeoutMs = 60_000) {
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this._uploadWaiters.delete(mediaId);
-        reject(new Error("Media transfer timeout"));
-      }, timeoutMs);
-      this._uploadWaiters.set(mediaId, {
-        resolve: (v) => {
-          clearTimeout(timer);
-          resolve(v);
-        },
-        reject: (e) => {
-          clearTimeout(timer);
-          reject(e);
-        },
-      });
     });
   }
 

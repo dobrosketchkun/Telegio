@@ -22,9 +22,6 @@ export const MEDIA_JPEG_QUALITY = 0.82;
 /** @type {number} Chunk size for media transfer (bytes before base64). */
 export const MEDIA_CHUNK_BYTES = 16 * 1024;
 
-/** @type {number} Host group media store budget (bytes). Soft RAM guard, not a UX “max video” cap. */
-export const HOST_MEDIA_BUDGET_BYTES = 1024 * 1024 * 1024;
-
 /** @type {number} Auto-fetch / auto-play videos at or under this size. */
 export const VIDEO_AUTO_DOWNLOAD_BYTES = 10 * 1024 * 1024;
 

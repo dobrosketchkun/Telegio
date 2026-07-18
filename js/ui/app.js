@@ -1025,15 +1025,15 @@ async function sendPendingMedia() {
           : "Preparing media…";
       setUploadStatus(label);
       if (thread.kind === "group") {
-        const uploaded = await session.uploadGroupMedia(files, {
+        const prepared = await session.prepareGroupMedia(files, {
           chatId: activeChatId,
           onProgress: setUploadStatus,
         });
         setUploadStatus("Sending…");
         session.sendGroupMedia(activeChatId, {
-          mediaIds: uploaded.mediaIds,
-          mediaInfo: uploaded.mediaInfo,
-          mediaKind: uploaded.mediaKind,
+          mediaIds: prepared.mediaIds,
+          mediaInfo: prepared.mediaInfo,
+          mediaKind: prepared.mediaKind,
           text: parsed.text || undefined,
           entities: parsed.entities.length ? parsed.entities : undefined,
           replyTo,
