@@ -20,8 +20,8 @@
             <input id="landing-name" name="displayName" required maxlength="32" placeholder="Your name" autocomplete="nickname" />
           </label>
           <label class="field" id="landing-title-field">
-            <span>Session title</span>
-            <input id="landing-title" name="title" maxlength="48" placeholder="Session" autocomplete="off" />
+            <span>Session title <em class="field__hint">(host only)</em></span>
+            <input id="landing-title" name="title" maxlength="48" placeholder="Weekend plans" autocomplete="off" />
           </label>
           <p id="landing-join-hint" class="landing__hint" hidden></p>
           <button type="submit" class="btn btn--primary" id="landing-submit">Create session</button>
@@ -73,6 +73,7 @@
             <span>Editing message</span>
             <button type="button" class="btn btn--danger" id="edit-bar-clear">Cancel</button>
           </div>
+          <div class="picker" id="picker" hidden></div>
           <form class="compose" id="compose-form">
             <textarea
               class="compose__input"
@@ -81,6 +82,7 @@
               placeholder="Write a message..."
               autocomplete="off"
             ></textarea>
+            <button type="button" class="compose__emoji" id="picker-toggle" aria-label="Emoji and stickers" title="Emoji & stickers">☺</button>
             <button class="compose__send" id="compose-send" type="submit" aria-label="Send">
               <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
                 <path d="M3.4 20.4l17.45-7.48a1 1 0 000-1.84L3.4 3.6a.993.993 0 00-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87.99l.01 4.61c0 .71.73 1.2 1.39.91z" />

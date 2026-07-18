@@ -15,6 +15,7 @@ import { dmIdFor, mintId } from "./ids.js";
  *   entities?: { type: string, offset: number, length: number, url?: string }[],
  *   replyTo?: string,
  *   delivery?: { ackedBy: string[] },
+ *   sticker?: { pack: string, stickerId: string },
  * }} Message
  * @typedef {{
  *   app: string,
@@ -216,6 +217,37 @@ export function applyHost(state, action, ctx) {
         kind: "text",
         text,
         entities: Array.isArray(action.entities) ? action.entities : undefined,
+        replyTo: action.replyTo,
+        delivery: { ackedBy: [] },
+      };
+      next.groupMessages[chatId] = [...(next.groupMessages[chatId] || []), msg];
+      effects.push({ event: "message-added", chatId, message: msg });
+      return { ok: true, state: next, effects };
+    }
+
+    case "send-sticker": {
+      const chatId = action.chatId;
+      const pack = String(action.pack || action.sticker?.pack || "").trim();
+      const stickerId = String(
+        action.stickerId || action.sticker?.stickerId || "",
+      ).trim();
+      if (!chatId || !next.groups[chatId]) {
+        return { ok: false, error: "Unknown group" };
+      }
+      const chat = next.groups[chatId];
+      if (!chat.memberPeerIds.includes(actor)) {
+        return { ok: false, error: "Not a group member" };
+      }
+      if (!pack || !stickerId) {
+        return { ok: false, error: "Missing sticker ref" };
+      }
+      const msg = {
+        id: mintId("m"),
+        chatId,
+        senderPeerId: actor,
+        createdAt: Date.now(),
+        kind: /** @type {const} */ ("sticker"),
+        sticker: { pack, stickerId },
         replyTo: action.replyTo,
         delivery: { ackedBy: [] },
       };
@@ -571,6 +603,71 @@ export function applyDm(dmState, selfPeerId, action, opts = {}) {
       return { ok: true, state: next, message: msg, dmId };
     }
 
+    case "dm-send-sticker": {
+      const otherFromRemote = remote;
+      let dmId = action.dmId || action.chatId;
+      if (!dmId && otherFromRemote) {
+        dmId = dmIdFor(selfPeerId, otherFromRemote);
+      }
+      const pack = String(action.pack || action.sticker?.pack || "").trim();
+      const stickerId = String(
+        action.stickerId || action.sticker?.stickerId || "",
+      ).trim();
+      if (!dmId) return { ok: false, error: "Unknown DM" };
+      if (!pack || !stickerId) {
+        return { ok: false, error: "Missing sticker ref" };
+      }
+
+      if (!next.dms[dmId]) {
+        if (!otherFromRemote) return { ok: false, error: "Unknown DM" };
+        const open = applyDm(
+          next,
+          selfPeerId,
+          { type: "dm-open", peerId: otherFromRemote },
+          { remoteSenderPeerId: otherFromRemote },
+        );
+        if (!open.ok) return open;
+        Object.assign(next, open.state);
+      }
+
+      const chat = next.dms[dmId];
+      if (!chat.memberPeerIds.includes(selfPeerId)) {
+        return { ok: false, error: "Not a DM participant" };
+      }
+      if (otherFromRemote && !chat.memberPeerIds.includes(otherFromRemote)) {
+        return { ok: false, error: "Sender not in DM" };
+      }
+
+      const senderPeerId = otherFromRemote || selfPeerId;
+      /** @type {Message} */
+      const msg = action.message
+        ? {
+            ...action.message,
+            chatId: dmId,
+            senderPeerId,
+            kind: "sticker",
+            sticker: { pack, stickerId },
+            delivery: action.message.delivery || { ackedBy: [] },
+          }
+        : {
+            id: mintId("m"),
+            chatId: dmId,
+            senderPeerId,
+            createdAt: Date.now(),
+            kind: "sticker",
+            sticker: { pack, stickerId },
+            replyTo: action.replyTo,
+            delivery: { ackedBy: [] },
+          };
+
+      const list = next.dmMessages[dmId] || [];
+      if (list.some((m) => m.id === msg.id)) {
+        return { ok: true, state: next, message: msg, dmId };
+      }
+      next.dmMessages[dmId] = [...list, msg];
+      return { ok: true, state: next, message: msg, dmId };
+    }
+
     case "dm-edit": {
       const dmId = action.dmId || action.chatId;
       const messageId = action.messageId;
@@ -759,6 +856,7 @@ export function fanoutPeerIdsForGroup(state, chatId) {
 function previewText(last) {
   if (!last) return "No messages yet";
   if (last.kind === "system") return last.text || "System";
+  if (last.kind === "sticker") return "Sticker";
   return last.text || "Message";
 }
 

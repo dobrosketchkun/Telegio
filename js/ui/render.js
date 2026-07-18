@@ -1,4 +1,5 @@
 import { isFullyDelivered, renderEntities } from "../entities.js";
+import { stickerFileUrl } from "../stickers.js";
 
 /**
  * @param {HTMLElement} root
@@ -193,15 +194,37 @@ export function renderThread(
       }
       const qText = document.createElement("div");
       qText.className = "bubble__quote-text";
-      qText.textContent = parent?.text || "Original message";
+      qText.textContent =
+        parent?.kind === "sticker"
+          ? "Sticker"
+          : parent?.text || "Original message";
       quote.append(qName, qText);
       bubble.append(quote);
     }
 
-    const text = document.createElement("div");
-    text.className = "bubble__text";
-    text.append(renderEntities(msg.text || "", msg.entities));
-    bubble.append(text);
+    if (msg.kind === "sticker" && msg.sticker) {
+      const media = document.createElement("div");
+      media.className = "bubble__sticker";
+      const img = document.createElement("img");
+      img.className = "sticker-img";
+      img.src = stickerFileUrl(msg.sticker.pack, msg.sticker.stickerId);
+      img.alt = "sticker";
+      img.loading = "lazy";
+      img.addEventListener("error", () => {
+        const fallback = document.createElement("span");
+        fallback.className = "sticker-fallback";
+        fallback.textContent = "sticker";
+        img.replaceWith(fallback);
+      });
+      media.append(img);
+      bubble.append(media);
+      bubble.classList.add("bubble--sticker");
+    } else {
+      const text = document.createElement("div");
+      text.className = "bubble__text";
+      text.append(renderEntities(msg.text || "", msg.entities));
+      bubble.append(text);
+    }
 
     const meta = document.createElement("div");
     meta.className = "bubble__meta";
@@ -214,7 +237,7 @@ export function renderThread(
     const time = document.createElement("span");
     time.textContent = formatTime(msg.createdAt);
     meta.append(time);
-    if (outgoing && msg.kind === "text") {
+    if (outgoing && (msg.kind === "text" || msg.kind === "sticker")) {
       const checks = document.createElement("span");
       checks.className = "checks";
       const delivered = isFullyDelivered(

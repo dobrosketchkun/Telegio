@@ -12,6 +12,8 @@ import { buildFixture } from "../fixture.js";
 import { isFixtureMode, readJoinSessionId } from "../invite.js";
 import { selfCheckEnvelope } from "../protocol.js";
 import { ChatSession } from "../session.js";
+import { ensureFixturePacks } from "../stickers.js";
+import { addPacksFromText, createPicker } from "./picker.js";
 import { renderChatList, renderThread } from "./render.js";
 
 const els = {
@@ -50,6 +52,8 @@ const els = {
   editBar: document.querySelector("#edit-bar"),
   editBarClear: document.querySelector("#edit-bar-clear"),
   jumpFab: document.querySelector("#jump-fab"),
+  picker: document.querySelector("#picker"),
+  pickerToggle: document.querySelector("#picker-toggle"),
 };
 
 /** @type {"fixture" | "online" | null} */
@@ -72,6 +76,12 @@ const unread = Object.create(null);
 const seenMessageIds = new Map();
 
 const joinId = readJoinSessionId();
+
+const picker = createPicker(els.picker, {
+  onEmoji: (emoji) => insertAtCursor(els.composeInput, emoji),
+  onSticker: (ref) => sendSticker(ref),
+  onRequestAddPacks: () => openAddPacksModal(),
+});
 
 function getStore() {
   if (mode === "fixture" && fixtureStore) return fixtureStore;
@@ -151,7 +161,8 @@ function setReply(messageId) {
     msg.senderPeerId === store.selfPeerId
       ? "You"
       : sender?.displayName || msg.senderPeerId || "Message";
-  els.replyBarText.textContent = msg.text || "";
+  els.replyBarText.textContent =
+    msg.kind === "sticker" ? "Sticker" : msg.text || "";
   els.replyBar.hidden = false;
   els.composeInput.focus();
 }
@@ -184,7 +195,16 @@ function updateJumpFab() {
 
 function paint() {
   const store = getStore();
-  if (!store) return;
+  if (!store) {
+    if (els.sessionLabel && mode === "online" && session?.role === "guest") {
+      els.sessionLabel.textContent = "Joining…";
+    }
+    els.btnNewDm && (els.btnNewDm.disabled = true);
+    els.btnNewGroup && (els.btnNewGroup.disabled = true);
+    els.composeInput && (els.composeInput.disabled = true);
+    els.composeSend && (els.composeSend.disabled = true);
+    return;
+  }
 
   trackUnread(store);
 
@@ -315,9 +335,11 @@ function enterAppShell({ badge, status, inviteUrl }) {
   }
 }
 
-function startFixture() {
+async function startFixture() {
   mode = "fixture";
-  fixtureStore = buildFixture();
+  enterAppShell({ badge: "Fixture", status: "Loading stickers…" });
+  const pack = await ensureFixturePacks();
+  fixtureStore = buildFixture(pack);
   const privacy = assertHostExcludesDms(
     fixtureStore.hostState,
     fixtureStore.dmState,
@@ -327,11 +349,146 @@ function startFixture() {
     [
       envOk ? "envelope mode=none ok" : "envelope FAIL",
       privacy.ok ? "host snapshot excludes DMs" : privacy.error,
+      `pack ${pack.name}`,
     ].join(" · "),
     envOk && privacy.ok,
   );
-  enterAppShell({ badge: "Fixture", status: "Offline fixture" });
+  if (els.connStatus) els.connStatus.textContent = "Offline fixture";
+  picker.focusPack([pack.name]);
   paint();
+}
+
+/**
+ * @param {HTMLTextAreaElement} input
+ * @param {string} text
+ */
+function insertAtCursor(input, text) {
+  if (!input || input.disabled) return;
+  const start = input.selectionStart ?? input.value.length;
+  const end = input.selectionEnd ?? start;
+  const v = input.value;
+  input.value = v.slice(0, start) + text + v.slice(end);
+  const pos = start + text.length;
+  input.setSelectionRange(pos, pos);
+  input.focus();
+}
+
+/**
+ * @param {{ pack: string, stickerId: string, emoji?: string }} ref
+ */
+function sendSticker(ref) {
+  if (!activeChatId) return;
+  const store = getStore();
+  if (!store) return;
+  const thread = getChatThread(
+    store.hostState,
+    store.dmState,
+    activeChatId,
+  );
+  if (!thread) return;
+  const replyTo = replyToId || undefined;
+
+  if (mode === "fixture" && fixtureStore) {
+    if (thread.kind === "group") {
+      const r = applyHost(
+        fixtureStore.hostState,
+        {
+          type: "send-sticker",
+          chatId: activeChatId,
+          pack: ref.pack,
+          stickerId: ref.stickerId,
+          replyTo,
+        },
+        { actorPeerId: fixtureStore.selfPeerId },
+      );
+      if (r.ok) fixtureStore = { ...fixtureStore, hostState: r.state };
+    } else {
+      const r = applyDm(fixtureStore.dmState, fixtureStore.selfPeerId, {
+        type: "dm-send-sticker",
+        dmId: activeChatId,
+        pack: ref.pack,
+        stickerId: ref.stickerId,
+        replyTo,
+      });
+      if (r.ok) fixtureStore = { ...fixtureStore, dmState: r.state };
+    }
+    clearReply();
+    paint();
+    return;
+  }
+
+  if (session && !session.sessionEnded) {
+    if (thread.kind === "group") {
+      session.sendGroupSticker(activeChatId, {
+        pack: ref.pack,
+        stickerId: ref.stickerId,
+        replyTo,
+      });
+    } else {
+      session.sendDmSticker(activeChatId, {
+        pack: ref.pack,
+        stickerId: ref.stickerId,
+        replyTo,
+      });
+    }
+    clearReply();
+  }
+}
+
+function openAddPacksModal() {
+  openModal(
+    "Add sticker packs",
+    (body) => {
+      const label = document.createElement("label");
+      label.className = "field";
+      label.innerHTML = `<span>Pack links or names (one per line)</span>`;
+      const ta = document.createElement("textarea");
+      ta.id = "pack-list-input";
+      ta.rows = 5;
+      ta.placeholder =
+        "https://t.me/addstickers/TofPaintSafe\nAnotherPackName";
+      ta.style.cssText =
+        "width:100%;border:1px solid var(--border);border-radius:10px;padding:10px;font:inherit;resize:vertical";
+      label.append(ta);
+      body.append(label);
+      const status = document.createElement("p");
+      status.id = "pack-list-status";
+      status.style.cssText =
+        "font-size:12px;color:var(--text-secondary);margin:8px 0 0";
+      body.append(status);
+    },
+    async () => {
+      const ta = els.modalBody.querySelector("#pack-list-input");
+      const status = els.modalBody.querySelector("#pack-list-status");
+      const text = ta?.value || "";
+      if (status) status.textContent = "Fetching…";
+      els.modalOk.disabled = true;
+      try {
+        const result = await addPacksFromText(text);
+        const parts = [];
+        if (result.ok.length) parts.push(`Added: ${result.ok.join(", ")}`);
+        for (const err of result.errors) {
+          parts.push(`${err.input}: ${err.error}`);
+        }
+        if (status) status.textContent = parts.join(" · ") || "Nothing to add";
+        if (result.ok.length) {
+          picker.focusPack(result.ok);
+          showBanner(`Packs: ${result.ok.join(", ")}`, true);
+          closeModal();
+        }
+      } finally {
+        els.modalOk.disabled = false;
+      }
+    },
+  );
+}
+
+function togglePicker() {
+  if (!els.picker || !els.pickerToggle) return;
+  const open = els.picker.hidden;
+  els.picker.hidden = !open;
+  els.pickerToggle.classList.toggle("is-active", open);
+  if (open) picker.render();
 }
 
 async function startOnlineHost(displayName, title) {
@@ -346,11 +503,11 @@ async function startOnlineHost(displayName, title) {
   enterAppShell({ badge: "Host", status: "Connecting…" });
   try {
     await session.createHost({ displayName, title });
-    enterAppShell({
-      badge: "Host",
-      status: "Connected (1)",
-      inviteUrl: session.inviteUrl,
-    });
+    // Keep status from session.onStatus (e.g. "Online · waiting for guests")
+    if (els.inviteBox && els.inviteUrl && session.inviteUrl) {
+      els.inviteBox.hidden = false;
+      els.inviteUrl.value = session.inviteUrl;
+    }
     paint();
   } catch (e) {
     showBanner(e?.message || String(e), false);
@@ -619,6 +776,7 @@ els.inviteCopy?.addEventListener("click", async () => {
 
 els.btnNewDm?.addEventListener("click", openNewDmModal);
 els.btnNewGroup?.addEventListener("click", openNewGroupModal);
+els.pickerToggle?.addEventListener("click", togglePicker);
 els.modalCancel?.addEventListener("click", closeModal);
 els.modalOk?.addEventListener("click", () => {
   modalConfirm?.();

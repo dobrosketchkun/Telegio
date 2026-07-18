@@ -40,10 +40,11 @@ const PEERS = {
 };
 
 /**
- * Build a fixture session with Phase 2 chrome samples.
+ * Build a fixture session with Phase 2–3 chrome samples.
+ * @param {{ name: string, stickers?: { id: string }[] } | null} [pack]
  * @returns {{ selfPeerId: string, hostState: import("./engine.js").HostState, dmState: import("./engine.js").DmState }}
  */
-export function buildFixture() {
+export function buildFixture(pack = null) {
   let hostState = createHostState({
     sessionId: "fixture01",
     title: "Fixture session",
@@ -171,9 +172,41 @@ export function buildFixture() {
     {
       type: "send-text",
       chatId: notesId,
-      text: "Phase 2 fixture: reply, spoiler, edit, checks",
+      text: "Phase 3 fixture: stickers + reply / spoiler / edit",
     },
     { actorPeerId: PEERS.mira.peerId },
+  );
+  if (!r.ok) throw new Error(r.error);
+  hostState = r.state;
+
+  const stickerIds = (pack?.stickers || []).map((s) => s.id).filter(Boolean);
+  const packName = pack?.name || "TofPaintSafe";
+  const sid0 = stickerIds[0] || "AgADegEAAki6kgc";
+  const sid1 = stickerIds[1] || stickerIds[0] || "AgADfAEAAki6kgc";
+
+  r = applyHost(
+    hostState,
+    {
+      type: "send-sticker",
+      chatId: groupId,
+      pack: packName,
+      stickerId: sid0,
+    },
+    { actorPeerId: PEERS.mira.peerId },
+  );
+  if (!r.ok) throw new Error(r.error);
+  hostState = r.state;
+
+  r = applyHost(
+    hostState,
+    {
+      type: "send-sticker",
+      chatId: groupId,
+      pack: packName,
+      stickerId: sid1,
+      replyTo: miraMsgId,
+    },
+    { actorPeerId: PEERS.self.peerId },
   );
   if (!r.ok) throw new Error(r.error);
   hostState = r.state;
@@ -217,6 +250,15 @@ export function buildFixture() {
     },
     { remoteSenderPeerId: PEERS.mira.peerId },
   );
+  if (!dr.ok) throw new Error(dr.error);
+  dmState = dr.state;
+
+  dr = applyDm(dmState, PEERS.self.peerId, {
+    type: "dm-send-sticker",
+    dmId,
+    pack: packName,
+    stickerId: sid0,
+  });
   if (!dr.ok) throw new Error(dr.error);
   dmState = dr.state;
 

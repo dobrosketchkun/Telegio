@@ -51,6 +51,10 @@ export class ChatSession {
     this._room = null;
     this._chat = null;
     this._awaitingHello = new Set();
+    /** @type {ReturnType<typeof setInterval> | null} */
+    this._helloRetry = null;
+    /** @type {string} */
+    this._pendingDisplayName = "";
   }
 
   get roster() {
@@ -110,19 +114,15 @@ export class ChatSession {
     this._pendingDisplayName = displayName;
 
     await this._joinRoom(joinRoom, sessionId);
-    this._send(
-      encodeFrame("hello", {
-        app: APP_ID,
-        version: APP_VERSION,
-        displayName,
-      }),
-    );
-    this.hooks.onStatus("Waiting for host…");
+    this._sendHello();
+    this._startHelloRetry();
+    this.hooks.onStatus(this._statusLabel());
     this.hooks.onChange();
     return this;
   }
 
   leave() {
+    this._stopHelloRetry();
     if (this.role === "host" && this.hostState && !this.sessionEnded) {
       this._endSessionLocal("Host left");
       try {
@@ -251,6 +251,54 @@ export class ChatSession {
 
   /**
    * @param {string} chatId
+   * @param {{ pack: string, stickerId: string, replyTo?: string }} sticker
+   */
+  sendGroupSticker(chatId, sticker) {
+    this.dispatchHostAction({
+      type: "send-sticker",
+      chatId,
+      pack: sticker.pack,
+      stickerId: sticker.stickerId,
+      replyTo: sticker.replyTo,
+    });
+  }
+
+  /**
+   * @param {string} dmId
+   * @param {{ pack: string, stickerId: string, replyTo?: string }} sticker
+   */
+  sendDmSticker(dmId, sticker) {
+    const r = applyDm(this.dmState, this.selfPeerId, {
+      type: "dm-send-sticker",
+      dmId,
+      pack: sticker.pack,
+      stickerId: sticker.stickerId,
+      replyTo: sticker.replyTo,
+    });
+    if (!r.ok || !r.message) {
+      this.hooks.onError(r.error || "Sticker send failed");
+      return;
+    }
+    this.dmState = r.state;
+    const other = this._dmOther(dmId);
+    if (!other) {
+      this.hooks.onError("DM peer missing");
+      return;
+    }
+    this._send(
+      encodeFrame("dm-send-sticker", {
+        dmId,
+        message: r.message,
+        pack: sticker.pack,
+        stickerId: sticker.stickerId,
+      }),
+      other,
+    );
+    this.hooks.onChange();
+  }
+
+  /**
+   * @param {string} chatId
    * @param {string} messageId
    * @param {string} text
    * @param {object[]} [entities]
@@ -348,9 +396,15 @@ export class ChatSession {
       this.connectedPeers.add(peerId);
       if (this.role === "host") {
         this._awaitingHello.add(peerId);
+        // Guest hello can race before the data channel is up — nudge them.
+        window.setTimeout(() => {
+          if (this._awaitingHello.has(peerId)) {
+            this._send(encodeFrame("hello-request", {}), peerId);
+          }
+        }, 800);
       }
-      if (this.role === "guest" && this.hostState) {
-        // re-hello if we reconnect somehow
+      if (this.role === "guest" && !this.hostState) {
+        this._sendHello(peerId);
       }
       this.hooks.onStatus(this._statusLabel());
       this.hooks.onChange();
@@ -499,6 +553,7 @@ export class ChatSession {
     if (
       type === "dm-open" ||
       type === "dm-send-text" ||
+      type === "dm-send-sticker" ||
       type === "dm-edit" ||
       type === "dm-ack" ||
       type === "dm-delete"
@@ -513,6 +568,11 @@ export class ChatSession {
    * @param {string} peerId
    */
   _onGuestFrame(type, body, peerId) {
+    if (type === "hello-request") {
+      if (!this.hostState) this._sendHello(peerId);
+      return;
+    }
+
     if (type === "welcome") {
       const state = body.state;
       if (!state || typeof state !== "object") return;
@@ -521,6 +581,7 @@ export class ChatSession {
       if (Array.isArray(body.roster)) {
         this.hostState = { ...this.hostState, roster: body.roster };
       }
+      this._stopHelloRetry();
       this.hooks.onStatus(this._statusLabel());
       this.hooks.onChange();
       return;
@@ -553,11 +614,13 @@ export class ChatSession {
     }
 
     if (type === "error") {
+      this._stopHelloRetry();
       this.hooks.onError(body.message || "Error");
       return;
     }
 
     if (type === "session-ended") {
+      this._stopHelloRetry();
       this._endSessionLocal(body.reason || "Session ended");
       return;
     }
@@ -565,6 +628,7 @@ export class ChatSession {
     if (
       type === "dm-open" ||
       type === "dm-send-text" ||
+      type === "dm-send-sticker" ||
       type === "dm-edit" ||
       type === "dm-ack" ||
       type === "dm-delete"
@@ -609,6 +673,33 @@ export class ChatSession {
           dmId,
           message: body.message,
           text: body.text,
+        },
+        { remoteSenderPeerId: peerId },
+      );
+      if (r.ok) {
+        this.dmState = r.state;
+        if (body.message?.id || r.message?.id) {
+          const id = body.message?.id || r.message.id;
+          this._send(
+            encodeFrame("dm-ack", { dmId, messageIds: [id] }),
+            peerId,
+          );
+        }
+        this.hooks.onChange();
+      }
+      return;
+    }
+
+    if (type === "dm-send-sticker") {
+      const r = applyDm(
+        this.dmState,
+        this.selfPeerId,
+        {
+          type: "dm-send-sticker",
+          dmId,
+          message: body.message,
+          pack: body.pack || body.message?.sticker?.pack,
+          stickerId: body.stickerId || body.message?.sticker?.stickerId,
         },
         { remoteSenderPeerId: peerId },
       );
@@ -781,6 +872,40 @@ export class ChatSession {
    * @param {object} frame
    * @param {string} [peerId]
    */
+  /**
+   * @param {string} [targetPeerId]
+   */
+  _sendHello(targetPeerId) {
+    const displayName = this._pendingDisplayName || "Guest";
+    this._send(
+      encodeFrame("hello", {
+        app: APP_ID,
+        version: APP_VERSION,
+        displayName,
+      }),
+      targetPeerId,
+    );
+  }
+
+  _startHelloRetry() {
+    this._stopHelloRetry();
+    this._helloRetry = setInterval(() => {
+      if (this.hostState || this.ended || this.role !== "guest") {
+        this._stopHelloRetry();
+        return;
+      }
+      if (this.connectedPeers.size) this._sendHello();
+      this.hooks.onStatus(this._statusLabel());
+    }, 2500);
+  }
+
+  _stopHelloRetry() {
+    if (this._helloRetry != null) {
+      clearInterval(this._helloRetry);
+      this._helloRetry = null;
+    }
+  }
+
   _send(frame, peerId) {
     if (!this._chat) return;
     if (peerId) this._chat.send(frame, { target: peerId });
@@ -813,8 +938,16 @@ export class ChatSession {
 
   _statusLabel() {
     if (this.sessionEnded) return "Session ended";
-    if (!this.hostState && this.role === "guest") return "Waiting for host…";
+    if (this.role === "guest" && !this.hostState) {
+      if (this.connectedPeers.size === 0) {
+        return "Looking for host… (VPN often blocks P2P — try without VPN)";
+      }
+      return "Peer linked · waiting for welcome…";
+    }
     const n = this.hostState?.roster?.length || 1;
+    if (this.role === "host" && n <= 1 && this.connectedPeers.size === 0) {
+      return "Online · waiting for guests";
+    }
     return `Connected (${n})`;
   }
 }
