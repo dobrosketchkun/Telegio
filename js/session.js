@@ -1315,8 +1315,10 @@ export class ChatSession {
         // Guests only accept offers when fetching (host→guest) or DM.
         // Group uploads are host-only; ignore peer→guest group offers.
       }
+      const total = Number(body.total);
       log("media", "offer", mediaId, {
         size: body.size,
+        total: Number.isFinite(total) ? total : undefined,
         from: peerId,
         dm: Boolean(body.dmId),
       });
@@ -1325,10 +1327,15 @@ export class ChatSession {
         mime: body.mime,
         duration: body.duration != null ? Number(body.duration) : undefined,
       });
+      const prev = this._incoming.get(mediaId);
+      if (prev?.assembleTimer != null) clearTimeout(prev.assembleTimer);
       this._incoming.set(mediaId, {
         meta: body,
-        chunks: [],
+        chunks: /** @type {string[]} */ ([]),
+        total: Number.isFinite(total) && total > 0 ? total : 0,
         from: peerId,
+        completeSignaled: false,
+        assembleTimer: null,
       });
       return;
     }
@@ -1336,8 +1343,13 @@ export class ChatSession {
     if (type === "media-chunk") {
       const inc = this._incoming.get(mediaId);
       if (!inc) return;
-      const index = Number(body.index) || 0;
-      inc.chunks[index] = String(body.data || "");
+      const index = Number(body.index);
+      const total = Number(body.total);
+      if (!Number.isInteger(index) || index < 0) return;
+      if (typeof body.data !== "string" || !body.data) return;
+      if (Number.isFinite(total) && total > 0) inc.total = total;
+      inc.chunks[index] = body.data;
+      if (inc.completeSignaled) this._tryAssembleIncoming(mediaId, peerId);
       return;
     }
 
@@ -1353,68 +1365,19 @@ export class ChatSession {
         return;
       }
 
-      // Uploader finished sending chunks → assemble
+      // Uploader finished sending chunks → assemble when all chunks present
       const inc = this._incoming.get(mediaId);
       if (!inc) return;
-      try {
-        const blob = blobFromBase64Chunks(
-          inc.chunks.filter(Boolean),
-          inc.meta.mime || "application/octet-stream",
-        );
-        /** @type {MediaEntry} */
-        const entry = {
-          mime: inc.meta.mime || blob.type || "application/octet-stream",
-          size: Number(inc.meta.size) || blob.size,
-          width: inc.meta.width,
-          height: inc.meta.height,
-          duration:
-            inc.meta.duration != null ? Number(inc.meta.duration) : undefined,
-          blob,
-          senderPeerId: peerId,
-          chatId: inc.meta.chatId,
-          dmId: inc.meta.dmId,
-        };
-
-        if (inc.meta.dmId) {
-          this.putLocalMedia(mediaId, entry);
-        } else if (this.role === "host") {
-          const ok = this._hostAcceptMedia(mediaId, entry);
-          if (!ok) {
-            this._incoming.delete(mediaId);
-            this._send(
-              encodeFrame("media-complete", {
-                mediaId,
-                ok: false,
-                reason: "Host media budget exceeded",
-              }),
-              peerId,
-            );
-            return;
-          }
-        } else {
-          // Guest receiving fetch from host
-          this.putLocalMedia(mediaId, entry);
-          this._fetching.delete(mediaId);
-        }
-
-        this._incoming.delete(mediaId);
-        this._send(
-          encodeFrame("media-complete", { mediaId, ok: true }),
-          peerId,
-        );
-        log("media", "assembled", mediaId, entry.size);
-        this.hooks.onChange();
-      } catch (e) {
-        this._incoming.delete(mediaId);
-        this._fetching.delete(mediaId);
-        this._send(
-          encodeFrame("media-complete", {
+      inc.completeSignaled = true;
+      if (!this._tryAssembleIncoming(mediaId, peerId)) {
+        if (inc.assembleTimer != null) clearTimeout(inc.assembleTimer);
+        inc.assembleTimer = setTimeout(() => {
+          this._failIncomingMedia(
             mediaId,
-            ok: false,
-            reason: e?.message || "Assemble failed",
-          }),
-          peerId,
-        );
+            peerId,
+            "Incomplete media transfer (missing chunks)",
+          );
+        }, 20_000);
       }
       return;
     }
@@ -1478,24 +1441,127 @@ export class ChatSession {
   }
 
   /**
+   * Assemble only when every chunk index is present; never skip gaps.
+   * @param {string} mediaId
+   * @param {string} peerId
+   * @returns {boolean} true if assembled or failed (incoming cleared)
+   */
+  _tryAssembleIncoming(mediaId, peerId) {
+    const inc = this._incoming.get(mediaId);
+    if (!inc?.completeSignaled) return false;
+    const total = Number(inc.total);
+    if (!Number.isInteger(total) || total <= 0) return false;
+    for (let i = 0; i < total; i++) {
+      if (typeof inc.chunks[i] !== "string" || !inc.chunks[i]) return false;
+    }
+
+    if (inc.assembleTimer != null) {
+      clearTimeout(inc.assembleTimer);
+      inc.assembleTimer = null;
+    }
+
+    try {
+      /** @type {string[]} */
+      const ordered = [];
+      for (let i = 0; i < total; i++) ordered.push(inc.chunks[i]);
+      const blob = blobFromBase64Chunks(
+        ordered,
+        inc.meta.mime || "application/octet-stream",
+      );
+      const expected = Number(inc.meta.size) || 0;
+      if (expected > 0 && blob.size !== expected) {
+        throw new Error(
+          `Media size mismatch (${blob.size} ≠ ${expected})`,
+        );
+      }
+
+      /** @type {MediaEntry} */
+      const entry = {
+        mime: inc.meta.mime || blob.type || "application/octet-stream",
+        size: blob.size,
+        width: inc.meta.width,
+        height: inc.meta.height,
+        duration:
+          inc.meta.duration != null ? Number(inc.meta.duration) : undefined,
+        blob,
+        senderPeerId: peerId,
+        chatId: inc.meta.chatId,
+        dmId: inc.meta.dmId,
+      };
+
+      if (inc.meta.dmId) {
+        this.putLocalMedia(mediaId, entry);
+      } else if (this.role === "host") {
+        const ok = this._hostAcceptMedia(mediaId, entry);
+        if (!ok) {
+          this._incoming.delete(mediaId);
+          this._send(
+            encodeFrame("media-complete", {
+              mediaId,
+              ok: false,
+              reason: "Host media budget exceeded",
+            }),
+            peerId,
+          );
+          return true;
+        }
+      } else {
+        this.putLocalMedia(mediaId, entry);
+        this._fetching.delete(mediaId);
+      }
+
+      this._incoming.delete(mediaId);
+      this._send(
+        encodeFrame("media-complete", { mediaId, ok: true }),
+        peerId,
+      );
+      log("media", "assembled", mediaId, entry.size, `${total} chunks`);
+      this.hooks.onChange();
+      return true;
+    } catch (e) {
+      this._failIncomingMedia(
+        mediaId,
+        peerId,
+        e?.message || "Assemble failed",
+      );
+      return true;
+    }
+  }
+
+  /**
+   * @param {string} mediaId
+   * @param {string} peerId
+   * @param {string} reason
+   */
+  _failIncomingMedia(mediaId, peerId, reason) {
+    const inc = this._incoming.get(mediaId);
+    if (inc?.assembleTimer != null) clearTimeout(inc.assembleTimer);
+    this._incoming.delete(mediaId);
+    this._fetching.delete(mediaId);
+    warn("media", "assemble failed", mediaId, reason);
+    this._send(
+      encodeFrame("media-complete", {
+        mediaId,
+        ok: false,
+        reason,
+      }),
+      peerId,
+    );
+  }
+
+  /**
+   * Pace chunk sends so WebRTC data-channel buffers do not drop frames.
    * @param {string} peerId
    * @param {string} mediaId
-   * @param {MediaEntry} entry
-   * @param {{ chatId?: string, dmId?: string }} [scope]
+   * @param {string[]} chunks
+   * @param {object} offerBody
    */
-  async _transferMediaTo(peerId, mediaId, entry, scope = {}) {
-    const chunks = await blobToBase64Chunks(entry.blob);
-    const ack = this._waitUploadAck(mediaId);
+  async _sendMediaChunks(peerId, mediaId, chunks, offerBody) {
     this._send(
       encodeFrame("media-offer", {
+        ...offerBody,
         mediaId,
-        mime: entry.mime,
-        size: entry.size,
-        width: entry.width,
-        height: entry.height,
-        duration: entry.duration,
-        chatId: scope.chatId,
-        dmId: scope.dmId,
+        total: chunks.length,
       }),
       peerId,
     );
@@ -1509,14 +1575,42 @@ export class ChatSession {
         }),
         peerId,
       );
+      // Yield often; short pause every 8 chunks to drain SCTP buffer.
+      if ((index + 1) % 8 === 0) {
+        await new Promise((r) => setTimeout(r, 8));
+      } else {
+        await new Promise((r) => setTimeout(r, 0));
+      }
     }
     this._send(encodeFrame("media-complete", { mediaId }), peerId);
+  }
+
+  /**
+   * @param {string} peerId
+   * @param {string} mediaId
+   * @param {MediaEntry} entry
+   * @param {{ chatId?: string, dmId?: string }} [scope]
+   */
+  async _transferMediaTo(peerId, mediaId, entry, scope = {}) {
+    const chunks = await blobToBase64Chunks(entry.blob);
+    const ack = this._waitUploadAck(mediaId, Math.max(60_000, chunks.length * 40));
+    await this._sendMediaChunks(peerId, mediaId, chunks, {
+      mime: entry.mime,
+      size: entry.size,
+      width: entry.width,
+      height: entry.height,
+      duration: entry.duration,
+      chatId: scope.chatId,
+      dmId: scope.dmId,
+    });
     try {
       await ack;
     } catch (e) {
       const msg = e?.message || String(e);
       throw new Error(
-        /timeout|reject/i.test(msg) ? `${msg}. ${MEDIA_TURN_HINT}` : msg,
+        /timeout|reject|mismatch|incomplete/i.test(msg)
+          ? `${msg}. ${MEDIA_TURN_HINT}`
+          : msg,
       );
     }
   }
@@ -1529,31 +1623,15 @@ export class ChatSession {
    */
   async _streamMediaTo(peerId, mediaId, entry) {
     const chunks = await blobToBase64Chunks(entry.blob);
-    this._send(
-      encodeFrame("media-offer", {
-        mediaId,
-        mime: entry.mime,
-        size: entry.size,
-        width: entry.width,
-        height: entry.height,
-        duration: entry.duration,
-        chatId: entry.chatId,
-        dmId: entry.dmId,
-      }),
-      peerId,
-    );
-    for (let index = 0; index < chunks.length; index++) {
-      this._send(
-        encodeFrame("media-chunk", {
-          mediaId,
-          index,
-          total: chunks.length,
-          data: chunks[index],
-        }),
-        peerId,
-      );
-    }
-    this._send(encodeFrame("media-complete", { mediaId }), peerId);
+    await this._sendMediaChunks(peerId, mediaId, chunks, {
+      mime: entry.mime,
+      size: entry.size,
+      width: entry.width,
+      height: entry.height,
+      duration: entry.duration,
+      chatId: entry.chatId,
+      dmId: entry.dmId,
+    });
   }
 
   /**
