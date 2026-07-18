@@ -14,6 +14,7 @@ import {
 } from "./engine.js";
 import { makeSessionId, dmIdFor } from "./ids.js";
 import { mintInviteUrl } from "./invite.js";
+import { error as logError, log, warn } from "./log.js";
 import { decodeFrame, encodeFrame } from "./protocol.js";
 import { loadTrystero, roomConfig } from "./trystero.js";
 
@@ -53,8 +54,12 @@ export class ChatSession {
     this._awaitingHello = new Set();
     /** @type {ReturnType<typeof setInterval> | null} */
     this._helloRetry = null;
+    /** @type {ReturnType<typeof setInterval> | null} */
+    this._diagTimer = null;
     /** @type {string} */
     this._pendingDisplayName = "";
+    /** @type {string} */
+    this._sessionId = "";
   }
 
   get roster() {
@@ -76,8 +81,10 @@ export class ChatSession {
     const { joinRoom, selfId } = await loadTrystero();
     this.selfPeerId = selfId;
     this.role = "host";
+    log("host", "trystero loaded", { selfId });
 
     const sessionId = makeSessionId();
+    this._sessionId = sessionId;
     this.hostState = createHostState({
       sessionId,
       title,
@@ -91,6 +98,7 @@ export class ChatSession {
     });
     this.inviteUrl = mintInviteUrl(sessionId);
     this.dmState = createEmptyDmState();
+    log("host", "session minted", { sessionId, title, inviteUrl: this.inviteUrl });
 
     await this._joinRoom(joinRoom, sessionId);
     this.hooks.onStatus(this._statusLabel());
@@ -112,6 +120,8 @@ export class ChatSession {
     this.role = "guest";
     this.dmState = createEmptyDmState();
     this._pendingDisplayName = displayName;
+    this._sessionId = sessionId;
+    log("guest", "joining", { selfId, sessionId, displayName });
 
     await this._joinRoom(joinRoom, sessionId);
     this._sendHello();
@@ -123,6 +133,7 @@ export class ChatSession {
 
   leave() {
     this._stopHelloRetry();
+    this._stopDiag();
     if (this.role === "host" && this.hostState && !this.sessionEnded) {
       this._endSessionLocal("Host left");
       try {
@@ -378,8 +389,17 @@ export class ChatSession {
    * @param {string} sessionId
    */
   async _joinRoom(joinRoom, sessionId) {
-    const room = joinRoom(roomConfig(), sessionId, {
+    const cfg = roomConfig();
+    log("room", "joinRoom", {
+      sessionId,
+      role: this.role,
+      appId: cfg.appId,
+      iceServers: cfg.rtcConfig?.iceServers?.map((s) => s.urls),
+      turnCount: cfg.turnConfig?.length || 0,
+    });
+    const room = joinRoom(cfg, sessionId, {
       onJoinError: (err) => {
+        logError("room", "onJoinError", err);
         this.hooks.onError(err?.message || String(err));
         this.hooks.onStatus("Connection failed");
       },
@@ -387,23 +407,42 @@ export class ChatSession {
     this._room = room;
     const chat = room.makeAction("chat");
     this._chat = chat;
+    log("room", "joined", {
+      selfPeerId: this.selfPeerId,
+      peersNow: Object.keys(room.getPeers?.() || {}),
+    });
 
     chat.onMessage = (data, { peerId }) => {
+      let type = "?";
+      try {
+        type = decodeFrame(data).type;
+      } catch {
+        /* logged in _onFrame */
+      }
+      log("recv", type, "from", peerId);
       this._onFrame(data, peerId);
     };
 
     room.onPeerJoin = (peerId) => {
       this.connectedPeers.add(peerId);
+      const pc = room.getPeers?.()?.[peerId];
+      log("peer", "join", peerId, {
+        ice: pc?.iceConnectionState,
+        conn: pc?.connectionState,
+        peers: [...this.connectedPeers],
+      });
       if (this.role === "host") {
         this._awaitingHello.add(peerId);
         // Guest hello can race before the data channel is up — nudge them.
         window.setTimeout(() => {
           if (this._awaitingHello.has(peerId)) {
+            log("host", "hello-request →", peerId);
             this._send(encodeFrame("hello-request", {}), peerId);
           }
         }, 800);
       }
       if (this.role === "guest" && !this.hostState) {
+        log("guest", "hello → peer join", peerId);
         this._sendHello(peerId);
       }
       this.hooks.onStatus(this._statusLabel());
@@ -411,6 +450,7 @@ export class ChatSession {
     };
 
     room.onPeerLeave = (peerId) => {
+      log("peer", "leave", peerId);
       this.connectedPeers.delete(peerId);
       this._awaitingHello.delete(peerId);
       if (this.role === "host" && this.hostState) {
@@ -441,6 +481,8 @@ export class ChatSession {
       this.hooks.onStatus(this._statusLabel());
       this.hooks.onChange();
     };
+
+    this._startDiag();
 
     window.addEventListener("beforeunload", () => {
       if (this.role === "host") {
@@ -483,7 +525,9 @@ export class ChatSession {
     if (!this.hostState) return;
 
     if (type === "hello") {
+      log("host", "hello from", peerId, body);
       if (body.app !== APP_ID) {
+        warn("host", "app mismatch", body.app);
         this._send(
           encodeFrame("error", { message: "App mismatch" }),
           peerId,
@@ -491,6 +535,7 @@ export class ChatSession {
         return;
       }
       if (body.version !== APP_VERSION) {
+        warn("host", "version mismatch", body.version, "expected", APP_VERSION);
         this._send(
           encodeFrame("error", { message: "Version mismatch" }),
           peerId,
@@ -515,6 +560,10 @@ export class ChatSession {
         this._emitEffects(sys.effects, false);
       }
       const filtered = filterHostStateForPeer(this.hostState, peerId);
+      log("host", "welcome →", peerId, {
+        title: this.hostState.session?.title,
+        roster: this.hostState.roster.length,
+      });
       this._send(
         encodeFrame("welcome", {
           youAre: peerId,
@@ -569,19 +618,29 @@ export class ChatSession {
    */
   _onGuestFrame(type, body, peerId) {
     if (type === "hello-request") {
+      log("guest", "hello-request from", peerId);
       if (!this.hostState) this._sendHello(peerId);
       return;
     }
 
     if (type === "welcome") {
       const state = body.state;
-      if (!state || typeof state !== "object") return;
+      if (!state || typeof state !== "object") {
+        warn("guest", "welcome missing state", body);
+        return;
+      }
       this.hostState = state;
       // Ensure roster from welcome body if fuller
       if (Array.isArray(body.roster)) {
         this.hostState = { ...this.hostState, roster: body.roster };
       }
+      log("guest", "welcome ok", {
+        title: this.hostState.session?.title,
+        roster: this.hostState.roster?.length,
+        from: peerId,
+      });
       this._stopHelloRetry();
+      this._stopDiag();
       this.hooks.onStatus(this._statusLabel());
       this.hooks.onChange();
       return;
@@ -877,6 +936,7 @@ export class ChatSession {
    */
   _sendHello(targetPeerId) {
     const displayName = this._pendingDisplayName || "Guest";
+    log("guest", "send hello", { targetPeerId: targetPeerId || "*", displayName });
     this._send(
       encodeFrame("hello", {
         app: APP_ID,
@@ -894,7 +954,12 @@ export class ChatSession {
         this._stopHelloRetry();
         return;
       }
-      if (this.connectedPeers.size) this._sendHello();
+      if (this.connectedPeers.size) {
+        log("guest", "hello retry", { peers: [...this.connectedPeers] });
+        this._sendHello();
+      } else {
+        log("guest", "still no WebRTC peers — MQTT may be up, ICE/TURN likely failing");
+      }
       this.hooks.onStatus(this._statusLabel());
     }, 2500);
   }
@@ -906,10 +971,59 @@ export class ChatSession {
     }
   }
 
+  _startDiag() {
+    this._stopDiag();
+    this._diagTimer = setInterval(() => {
+      if (this.ended) {
+        this._stopDiag();
+        return;
+      }
+      if (this.role === "guest" && this.hostState) {
+        this._stopDiag();
+        return;
+      }
+      const peers = this._room?.getPeers?.() || {};
+      const snap = Object.fromEntries(
+        Object.entries(peers).map(([id, pc]) => [
+          id,
+          {
+            ice: pc?.iceConnectionState,
+            conn: pc?.connectionState,
+            gather: pc?.iceGatheringState,
+            signaling: pc?.signalingState,
+          },
+        ]),
+      );
+      log("diag", {
+        role: this.role,
+        sessionId: this._sessionId,
+        connectedPeers: [...this.connectedPeers],
+        awaitingHello: [...this._awaitingHello],
+        hasHostState: Boolean(this.hostState),
+        rtc: snap,
+      });
+    }, 5000);
+  }
+
+  _stopDiag() {
+    if (this._diagTimer != null) {
+      clearInterval(this._diagTimer);
+      this._diagTimer = null;
+    }
+  }
+
   _send(frame, peerId) {
-    if (!this._chat) return;
-    if (peerId) this._chat.send(frame, { target: peerId });
-    else this._chat.send(frame);
+    if (!this._chat) {
+      warn("send", "no chat action", frame?.type);
+      return;
+    }
+    log("send", frame?.type, peerId ? `→ ${peerId}` : "→ *");
+    const p = peerId
+      ? this._chat.send(frame, { target: peerId })
+      : this._chat.send(frame);
+    if (p && typeof p.catch === "function") {
+      p.catch((err) => logError("send", frame?.type, "failed", err));
+    }
   }
 
   /**

@@ -12,6 +12,7 @@ import { buildFixture } from "../fixture.js";
 import { isFixtureMode, readJoinSessionId } from "../invite.js";
 import { selfCheckEnvelope } from "../protocol.js";
 import { ChatSession } from "../session.js";
+import { log } from "../log.js";
 import { ensureFixturePacks } from "../stickers.js";
 import { addPacksFromText, createPicker } from "./picker.js";
 import { renderChatList, renderThread } from "./render.js";
@@ -76,6 +77,12 @@ const unread = Object.create(null);
 const seenMessageIds = new Map();
 
 const joinId = readJoinSessionId();
+log("boot", {
+  href: location.href,
+  joinId,
+  fixture: isFixtureMode(),
+  build: "phase3+conn-debug",
+});
 
 const picker = createPicker(els.picker, {
   onEmoji: (emoji) => insertAtCursor(els.composeInput, emoji),
@@ -793,10 +800,13 @@ if (isFixtureMode()) {
   startFixture();
 } else {
   if (joinId) {
-    els.landingTitleField.hidden = true;
-    els.landingJoinHint.hidden = false;
-    els.landingJoinHint.textContent = `Joining session: ${joinId}`;
-    els.landingSubmit.textContent = "Join session";
+    // Join links only need a display name — remove title field entirely.
+    els.landingTitleField?.remove();
+    if (els.landingJoinHint) {
+      els.landingJoinHint.hidden = false;
+      els.landingJoinHint.textContent = `Joining session ${joinId}`;
+    }
+    if (els.landingSubmit) els.landingSubmit.textContent = "Join session";
   }
 
   els.landingForm.addEventListener("submit", (e) => {
@@ -806,7 +816,7 @@ if (isFixtureMode()) {
     if (joinId) {
       startOnlineGuest(displayName, joinId);
     } else {
-      startOnlineHost(displayName, els.landingTitle.value.trim());
+      startOnlineHost(displayName, els.landingTitle?.value?.trim() || "");
     }
   });
 }

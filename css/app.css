@@ -88,18 +88,17 @@ textarea {
   color: var(--text-link);
 }
 
+/* Author .field { display:flex } would otherwise override the HTML hidden attribute */
+[hidden] {
+  display: none !important;
+}
+
 .field {
   display: flex;
   flex-direction: column;
   gap: 4px;
   font-size: 13px;
   color: var(--text-secondary);
-}
-
-.field__hint {
-  font-style: normal;
-  font-weight: 400;
-  opacity: 0.7;
 }
 
 .field input {
