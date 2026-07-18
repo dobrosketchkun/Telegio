@@ -7,9 +7,18 @@ import {
 } from "./constants.js";
 import { mintId } from "./ids.js";
 
-/** True when full video bytes should stay on sender until Download is tapped. */
-export function isDeferredVideoSize(size) {
+/** True when playable AV bytes stay on sender until Download is tapped. */
+export function isDeferredPlayableSize(size) {
   return Number(size) > VIDEO_AUTO_DOWNLOAD_BYTES;
+}
+
+/** @deprecated use isDeferredPlayableSize */
+export const isDeferredVideoSize = isDeferredPlayableSize;
+
+/** Video or audio mime — same auto-download / unlock gate. */
+export function isGatedPlayableMime(mime) {
+  const m = String(mime || "").toLowerCase();
+  return m.startsWith("video/") || m.startsWith("audio/");
 }
 
 /**
@@ -30,6 +39,13 @@ export function isDeferredVideoSize(size) {
  *   duration: number,
  *   size: number,
  * }} PreparedVideo
+ *
+ * @typedef {{
+ *   blob: Blob,
+ *   mime: string,
+ *   duration: number,
+ *   size: number,
+ * }} PreparedAudio
  */
 
 /** @returns {string} */
@@ -250,6 +266,34 @@ export async function prepareVideo(input) {
 }
 
 /**
+ * Prepare audio for send (no re-encode, no size reject).
+ * @param {Blob | File} input
+ * @returns {Promise<PreparedAudio>}
+ */
+export async function prepareAudio(input) {
+  if (!(input instanceof Blob)) {
+    throw new Error("Expected audio blob");
+  }
+  if (!input.type.startsWith("audio/") && input.type !== "") {
+    throw new Error("Not an audio file");
+  }
+
+  const mime = input.type || "audio/mpeg";
+  const url = URL.createObjectURL(input);
+  try {
+    const duration = await readAudioDuration(url, 2500);
+    return {
+      blob: input,
+      mime,
+      duration: Number.isFinite(duration) ? duration : 0,
+      size: input.size,
+    };
+  } finally {
+    URL.revokeObjectURL(url);
+  }
+}
+
+/**
  * Tiny JPEG poster frame for >10MB videos (travels with the message, not as a media transfer).
  * @param {Blob | File} input
  * @returns {Promise<string | undefined>} data URL
@@ -362,6 +406,35 @@ function readVideoMetadata(url, timeoutMs = 2500) {
 }
 
 /**
+ * @param {string} url
+ * @param {number} [timeoutMs]
+ * @returns {Promise<number>}
+ */
+function readAudioDuration(url, timeoutMs = 2500) {
+  return new Promise((resolve) => {
+    const audio = document.createElement("audio");
+    audio.preload = "metadata";
+    let done = false;
+    const finish = (duration) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      audio.onloadedmetadata = null;
+      audio.onerror = null;
+      audio.removeAttribute("src");
+      audio.load();
+      resolve(duration);
+    };
+    const timer = setTimeout(() => finish(0), timeoutMs);
+    audio.onloadedmetadata = () => {
+      finish(Number.isFinite(audio.duration) ? audio.duration : 0);
+    };
+    audio.onerror = () => finish(0);
+    audio.src = url;
+  });
+}
+
+/**
  * ~1s WebM via canvas + MediaRecorder for fixture mode.
  * @param {string} [label]
  * @returns {Promise<PreparedVideo | null>}
@@ -428,6 +501,105 @@ export async function makeFixtureVideo(label = "Clip") {
     duration: 1,
     size: blob.size,
   };
+}
+
+/**
+ * ~1s tone via oscillator + MediaRecorder, or tiny WAV fallback.
+ * @returns {Promise<PreparedAudio | null>}
+ */
+export async function makeFixtureAudio() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return makeTinyWavAudio();
+    const ctx = new Ctx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.frequency.value = 440;
+    gain.gain.value = 0.15;
+    const dest = ctx.createMediaStreamDestination();
+    osc.connect(gain);
+    gain.connect(dest);
+
+    const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+      ? "audio/webm;codecs=opus"
+      : MediaRecorder.isTypeSupported("audio/webm")
+        ? "audio/webm"
+        : "";
+    if (!mime || typeof MediaRecorder === "undefined") {
+      osc.disconnect();
+      gain.disconnect();
+      await ctx.close().catch(() => {});
+      return makeTinyWavAudio();
+    }
+
+    /** @type {Blob[]} */
+    const chunks = [];
+    const recorder = new MediaRecorder(dest.stream, { mimeType: mime });
+    recorder.ondataavailable = (e) => {
+      if (e.data?.size) chunks.push(e.data);
+    };
+    const done = new Promise((resolve, reject) => {
+      recorder.onstop = () => resolve(undefined);
+      recorder.onerror = () => reject(new Error("Audio MediaRecorder failed"));
+    });
+
+    recorder.start(50);
+    osc.start();
+    await new Promise((r) => setTimeout(r, 1000));
+    osc.stop();
+    recorder.stop();
+    await done;
+    osc.disconnect();
+    gain.disconnect();
+    await ctx.close().catch(() => {});
+
+    const blob = new Blob(chunks, {
+      type: mime.split(";")[0] || "audio/webm",
+    });
+    if (!blob.size) return makeTinyWavAudio();
+    return {
+      blob,
+      mime: blob.type || "audio/webm",
+      duration: 1,
+      size: blob.size,
+    };
+  } catch {
+    return makeTinyWavAudio();
+  }
+}
+
+/** @returns {PreparedAudio} */
+function makeTinyWavAudio() {
+  const sampleRate = 22050;
+  const seconds = 0.8;
+  const n = Math.floor(sampleRate * seconds);
+  const data = new Int16Array(n);
+  for (let i = 0; i < n; i++) {
+    data[i] = Math.sin((2 * Math.PI * 440 * i) / sampleRate) * 0.2 * 32767;
+  }
+  const buffer = new ArrayBuffer(44 + data.length * 2);
+  const view = new DataView(buffer);
+  const writeStr = (offset, s) => {
+    for (let i = 0; i < s.length; i++) view.setUint8(offset + i, s.charCodeAt(i));
+  };
+  writeStr(0, "RIFF");
+  view.setUint32(4, 36 + data.length * 2, true);
+  writeStr(8, "WAVE");
+  writeStr(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, "data");
+  view.setUint32(40, data.length * 2, true);
+  for (let i = 0; i < data.length; i++) {
+    view.setInt16(44 + i * 2, data[i], true);
+  }
+  const blob = new Blob([buffer], { type: "audio/wav" });
+  return { blob, mime: "audio/wav", duration: seconds, size: blob.size };
 }
 
 /**

@@ -7,7 +7,12 @@ import {
 } from "./engine.js";
 import { parseMarkdownLite } from "./entities.js";
 import { dmIdFor } from "./ids.js";
-import { makeFixtureImage, makeFixtureVideo, mintMediaId } from "./media.js";
+import {
+  makeFixtureAudio,
+  makeFixtureImage,
+  makeFixtureVideo,
+  mintMediaId,
+} from "./media.js";
 
 const PEERS = {
   host: {
@@ -178,7 +183,7 @@ export async function buildFixture(pack = null) {
     {
       type: "send-text",
       chatId: notesId,
-      text: "Phase 5 fixture: stickers + photos + albums + video",
+      text: "Phase 5.5 fixture: stickers + photos + albums + video + audio",
     },
     { actorPeerId: PEERS.mira.peerId },
   );
@@ -395,6 +400,66 @@ export async function buildFixture(pack = null) {
     const sys = appendSystemToGroups(
       hostState,
       "Video fixture skipped (MediaRecorder unavailable)",
+      [groupId],
+    );
+    hostState = sys.state;
+  }
+
+  const tone = await makeFixtureAudio();
+  if (tone) {
+    const midAud = mintMediaId();
+    const midAudDm = mintMediaId();
+    media.set(midAud, {
+      blob: tone.blob,
+      mime: tone.mime,
+      size: tone.size,
+      duration: tone.duration,
+      senderPeerId: PEERS.self.peerId,
+    });
+    media.set(midAudDm, {
+      blob: tone.blob,
+      mime: tone.mime,
+      size: tone.size,
+      duration: tone.duration,
+      senderPeerId: PEERS.self.peerId,
+    });
+
+    const audInfo = [
+      {
+        size: tone.size,
+        mime: tone.mime,
+        duration: tone.duration,
+      },
+    ];
+    r = applyHost(
+      hostState,
+      {
+        type: "send-media",
+        chatId: groupId,
+        mediaIds: [midAud],
+        mediaInfo: audInfo,
+        mediaKind: "audio",
+        text: "Short tone",
+      },
+      { actorPeerId: PEERS.self.peerId },
+    );
+    if (!r.ok) throw new Error(r.error);
+    hostState = r.state;
+
+    dr = applyDm(dmState, PEERS.self.peerId, {
+      type: "dm-send-media",
+      dmId,
+      mediaIds: [midAudDm],
+      mediaInfo: audInfo,
+      mediaKind: "audio",
+      text: "DM tone",
+    });
+    if (!dr.ok) throw new Error(dr.error);
+    dmState = dr.state;
+  } else {
+    const sys = appendSystemToGroups(
+      hostState,
+      "Audio fixture skipped",
       [groupId],
     );
     hostState = sys.state;

@@ -16,8 +16,10 @@ import {
   captureVideoThumbDataUrl,
   compressImage,
   formatBytes,
-  isDeferredVideoSize,
+  isDeferredPlayableSize,
+  isGatedPlayableMime,
   mintMediaId,
+  prepareAudio,
   prepareVideo,
 } from "../media.js";
 import { selfCheckEnvelope } from "../protocol.js";
@@ -100,7 +102,7 @@ log("boot", {
   href: location.href,
   joinId,
   fixture: isFixtureMode(),
-  build: "phase5-video",
+  build: "phase5.5-audio",
 });
 
 const picker = createPicker(els.picker, {
@@ -190,23 +192,29 @@ function setReply(messageId) {
   const mime = msg.mediaIds?.[0]
     ? resolveMediaMime(msg.mediaIds[0]) || msg.mediaInfo?.[0]?.mime
     : null;
+  const mimeLc = String(mime || "").toLowerCase();
   const asVideo =
     msg.kind === "video" ||
     (msg.kind === "media" &&
       msg.mediaIds?.length === 1 &&
-      String(mime || "")
-        .toLowerCase()
-        .startsWith("video/"));
+      mimeLc.startsWith("video/"));
+  const asAudio =
+    msg.kind === "audio" ||
+    (msg.kind === "media" &&
+      msg.mediaIds?.length === 1 &&
+      mimeLc.startsWith("audio/"));
   els.replyBarText.textContent =
     msg.kind === "sticker"
       ? "Sticker"
       : asVideo
         ? msg.text?.trim() || "Video"
-        : msg.kind === "media"
-          ? msg.text?.trim() || "Photo"
-          : msg.kind === "album"
-            ? msg.text?.trim() || "Album"
-            : msg.text || "";
+        : asAudio
+          ? msg.text?.trim() || "Audio"
+          : msg.kind === "media"
+            ? msg.text?.trim() || "Photo"
+            : msg.kind === "album"
+              ? msg.text?.trim() || "Album"
+              : msg.text || "";
   els.replyBar.hidden = false;
   els.composeInput.focus();
 }
@@ -396,7 +404,7 @@ function paint() {
         if (mime) mimes[id] = mime;
         if (msg.senderPeerId) senders[id] = msg.senderPeerId;
       });
-      // Sender already has bytes; everyone else skips large videos until Download.
+      // Sender already has bytes; everyone else skips large AV until Download.
       if (msg.senderPeerId === store.selfPeerId) {
         msg.mediaIds.forEach((id) => session.unlockMedia(id));
       }
@@ -412,14 +420,14 @@ function paint() {
         if (!m.mediaIds?.length) return false;
         const mime =
           m.mediaInfo?.[0]?.mime || resolveMediaMime(m.mediaIds[0]);
-        const asVideo =
+        const mimeLc = String(mime || "").toLowerCase();
+        const asPlayable =
           m.kind === "video" ||
+          m.kind === "audio" ||
           (m.kind === "media" &&
             m.mediaIds.length === 1 &&
-            String(mime || "")
-              .toLowerCase()
-              .startsWith("video/"));
-        return asVideo && m.mediaIds.some((id) => !resolveMediaUrl(id));
+            (mimeLc.startsWith("video/") || mimeLc.startsWith("audio/")));
+        return asPlayable && m.mediaIds.some((id) => !resolveMediaUrl(id));
       });
       if (!waiting) setUploadStatus("");
     }
@@ -778,7 +786,7 @@ function resolvePlayableMediaUrl(mediaId, gate = {}) {
     const size = Number(gate.size) || entry.size || 0;
     const mime = String(gate.mime || entry.mime || "").toLowerCase();
     const large =
-      mime.startsWith("video/") && size > VIDEO_AUTO_DOWNLOAD_BYTES;
+      isGatedPlayableMime(mime) && size > VIDEO_AUTO_DOWNLOAD_BYTES;
     if (large && !gate.outgoing && !unlockedFixtureMedia.has(mediaId)) {
       return null;
     }
@@ -844,6 +852,9 @@ function renderPendingStrip() {
     if (p.file.type.startsWith("video/")) {
       wrap.classList.add("attach-pending__thumb--video");
       wrap.textContent = "Video";
+    } else if (p.file.type.startsWith("audio/")) {
+      wrap.classList.add("attach-pending__thumb--audio");
+      wrap.textContent = "Audio";
     } else {
       const img = document.createElement("img");
       img.src = p.url;
@@ -865,20 +876,28 @@ function renderPendingStrip() {
  */
 function addPendingFiles(list) {
   const incoming = [...list].filter(
-    (f) => f.type.startsWith("image/") || f.type.startsWith("video/"),
+    (f) =>
+      f.type.startsWith("image/") ||
+      f.type.startsWith("video/") ||
+      f.type.startsWith("audio/"),
   );
   if (!incoming.length) {
-    showBanner("Only images or video", false);
+    showBanner("Only images, video, or audio", false);
     return;
   }
   const hasVideo = incoming.some((f) => f.type.startsWith("video/"));
+  const hasAudio = incoming.some((f) => f.type.startsWith("audio/"));
   const hasImage = incoming.some((f) => f.type.startsWith("image/"));
-  if (hasVideo && hasImage) {
-    showBanner("Cannot mix photos and video", false);
+  const kinds = [hasImage, hasVideo, hasAudio].filter(Boolean).length;
+  if (kinds > 1) {
+    showBanner("Cannot mix photos, video, and audio", false);
     return;
   }
   const pendingHasVideo = pendingFiles.some((p) =>
     p.file.type.startsWith("video/"),
+  );
+  const pendingHasAudio = pendingFiles.some((p) =>
+    p.file.type.startsWith("audio/"),
   );
   const pendingHasImage = pendingFiles.some((p) =>
     p.file.type.startsWith("image/"),
@@ -896,7 +915,19 @@ function addPendingFiles(list) {
     return;
   }
 
-  if (pendingHasVideo) clearPendingFiles();
+  if (hasAudio) {
+    if (incoming.filter((f) => f.type.startsWith("audio/")).length > 1) {
+      showBanner("Send one audio at a time", false);
+      return;
+    }
+    clearPendingFiles();
+    const file = incoming.find((f) => f.type.startsWith("audio/"));
+    if (file) pendingFiles.push({ file, url: URL.createObjectURL(file) });
+    renderPendingStrip();
+    return;
+  }
+
+  if (pendingHasVideo || pendingHasAudio) clearPendingFiles();
   if (pendingHasImage === false && pendingFiles.length) clearPendingFiles();
 
   const room = MAX_ALBUM_ITEMS - pendingFiles.length;
@@ -939,6 +970,7 @@ async function sendPendingMedia() {
       setUploadStatus("Preparing media…");
       if (!fixtureStore.media) fixtureStore.media = new Map();
       const isVideo = files.length === 1 && files[0].type.startsWith("video/");
+      const isAudio = files.length === 1 && files[0].type.startsWith("audio/");
       /** @type {string[]} */
       const mediaIds = [];
       let i = 0;
@@ -949,7 +981,7 @@ async function sendPendingMedia() {
           const prepared = await prepareVideo(file);
           const id = mintMediaId();
           let thumbDataUrl;
-          if (isDeferredVideoSize(prepared.size)) {
+          if (isDeferredPlayableSize(prepared.size)) {
             setUploadStatus("Making thumbnail…");
             thumbDataUrl = await captureVideoThumbDataUrl(prepared.blob);
           }
@@ -962,6 +994,19 @@ async function sendPendingMedia() {
             duration: prepared.duration,
             senderPeerId: fixtureStore.selfPeerId,
             thumbDataUrl,
+          });
+          unlockedFixtureMedia.add(id);
+          mediaIds.push(id);
+        } else if (isAudio) {
+          setUploadStatus(`Preparing audio… ${formatBytes(file.size)}`);
+          const prepared = await prepareAudio(file);
+          const id = mintMediaId();
+          fixtureStore.media.set(id, {
+            blob: prepared.blob,
+            mime: prepared.mime,
+            size: prepared.size,
+            duration: prepared.duration,
+            senderPeerId: fixtureStore.selfPeerId,
           });
           unlockedFixtureMedia.add(id);
           mediaIds.push(id);
@@ -980,7 +1025,7 @@ async function sendPendingMedia() {
           mediaIds.push(id);
         }
       }
-      const mediaKind = isVideo ? "video" : undefined;
+      const mediaKind = isVideo ? "video" : isAudio ? "audio" : undefined;
       const mediaInfoOut = mediaIds.map((id) => {
         const e = fixtureStore.media.get(id);
         return {
@@ -1027,7 +1072,9 @@ async function sendPendingMedia() {
       const label =
         files.length === 1 && files[0].type.startsWith("video/")
           ? `Preparing video… ${formatBytes(files[0].size)}`
-          : "Preparing media…";
+          : files.length === 1 && files[0].type.startsWith("audio/")
+            ? `Preparing audio… ${formatBytes(files[0].size)}`
+            : "Preparing media…";
       setUploadStatus(label);
       if (thread.kind === "group") {
         const prepared = await session.prepareGroupMedia(files, {

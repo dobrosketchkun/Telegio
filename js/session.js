@@ -4,7 +4,6 @@ import {
   MAX_ALBUM_ITEMS,
   MEDIA_CHUNK_BYTES,
   MEDIA_TURN_HINT,
-  VIDEO_AUTO_DOWNLOAD_BYTES,
 } from "./constants.js";
 import {
   addRosterPeer,
@@ -28,9 +27,11 @@ import {
   captureVideoThumbDataUrl,
   compressImage,
   formatBytes,
-  isDeferredVideoSize,
+  isDeferredPlayableSize,
+  isGatedPlayableMime,
   mediaChunkCount,
   mintMediaId,
+  prepareAudio,
   prepareVideo,
 } from "./media.js";
 import { decodeFrame, encodeFrame } from "./protocol.js";
@@ -137,8 +138,8 @@ export class ChatSession {
         this.getMediaEntry(mediaId)?.mime ||
         "",
     ).toLowerCase();
-    const isVideo = mime.startsWith("video/");
-    const large = isVideo && size > VIDEO_AUTO_DOWNLOAD_BYTES;
+    const large =
+      isGatedPlayableMime(mime) && isDeferredPlayableSize(size);
     if (large && !gate.outgoing && !this._mediaUnlocked.has(mediaId)) {
       return null;
     }
@@ -427,7 +428,7 @@ export class ChatSession {
    * Videos over VIDEO_AUTO_DOWNLOAD_BYTES also get a tiny poster thumb in mediaInfo.
    * @param {Blob[]} files
    * @param {{ chatId?: string, onProgress?: (label: string) => void }} [opts]
-   * @returns {Promise<{ mediaIds: string[], mediaKind?: "video", mediaInfo?: object[] }>}
+   * @returns {Promise<{ mediaIds: string[], mediaKind?: "video" | "audio", mediaInfo?: object[] }>}
    */
   async prepareGroupMedia(files, opts = {}) {
     if (!this.hostState) throw new Error("No session");
@@ -446,8 +447,8 @@ export class ChatSession {
         ),
       );
       const mediaId = mintMediaId();
-      const deferred =
-        batch.mediaKind === "video" && isDeferredVideoSize(prepared.size);
+      const deferredVideo =
+        batch.mediaKind === "video" && isDeferredPlayableSize(prepared.size);
       const entry = {
         mime: prepared.mime,
         size: prepared.size,
@@ -461,7 +462,7 @@ export class ChatSession {
 
       /** @type {string | undefined} */
       let thumbDataUrl;
-      if (deferred) {
+      if (deferredVideo) {
         opts.onProgress?.("Making thumbnail…");
         thumbDataUrl = await captureVideoThumbDataUrl(prepared.blob);
       }
@@ -486,10 +487,14 @@ export class ChatSession {
         thumbDataUrl,
       });
     }
+    /** @type {"video" | "audio" | undefined} */
+    let mediaKind;
+    if (batch.mediaKind === "video") mediaKind = "video";
+    else if (batch.mediaKind === "audio") mediaKind = "audio";
     return {
       mediaIds,
       mediaInfo,
-      mediaKind: batch.mediaKind === "video" ? "video" : undefined,
+      mediaKind,
     };
   }
 
@@ -534,8 +539,8 @@ export class ChatSession {
         ),
       );
       const mediaId = mintMediaId();
-      const deferred =
-        batch.mediaKind === "video" && isDeferredVideoSize(prepared.size);
+      const deferredVideo =
+        batch.mediaKind === "video" && isDeferredPlayableSize(prepared.size);
       const entry = {
         mime: prepared.mime,
         size: prepared.size,
@@ -551,7 +556,7 @@ export class ChatSession {
 
       /** @type {string | undefined} */
       let thumbDataUrl;
-      if (deferred) {
+      if (deferredVideo) {
         opts.onProgress?.("Making thumbnail…");
         thumbDataUrl = await captureVideoThumbDataUrl(prepared.blob);
       }
@@ -573,6 +578,11 @@ export class ChatSession {
       });
     }
 
+    /** @type {"video" | "audio" | undefined} */
+    let mediaKind;
+    if (batch.mediaKind === "video") mediaKind = "video";
+    else if (batch.mediaKind === "audio") mediaKind = "audio";
+
     const r = applyDm(this.dmState, this.selfPeerId, {
       type: "dm-send-media",
       dmId,
@@ -581,7 +591,7 @@ export class ChatSession {
       text: opts.text,
       entities: opts.entities,
       replyTo: opts.replyTo,
-      mediaKind: batch.mediaKind === "video" ? "video" : undefined,
+      mediaKind,
     });
     if (!r.ok || !r.message) {
       this.hooks.onError(r.error || "Media send failed");
@@ -595,7 +605,7 @@ export class ChatSession {
         mediaIds,
         mediaInfo,
         text: opts.text,
-        mediaKind: batch.mediaKind === "video" ? "video" : undefined,
+        mediaKind,
       }),
       other,
     );
@@ -604,7 +614,7 @@ export class ChatSession {
 
   /**
    * @param {Blob} file
-   * @param {"image" | "video"} kind
+   * @param {"image" | "video" | "audio"} kind
    * @param {(label: string) => void} [onLabel]
    */
   async _prepareFile(file, kind, onLabel) {
@@ -618,6 +628,18 @@ export class ChatSession {
         height: v.height,
         duration: v.duration,
         size: v.size,
+      };
+    }
+    if (kind === "audio") {
+      onLabel?.("Preparing audio");
+      const a = await prepareAudio(file);
+      return {
+        blob: a.blob,
+        mime: a.mime,
+        width: 0,
+        height: 0,
+        duration: a.duration,
+        size: a.size,
       };
     }
     onLabel?.("Compressing");
@@ -645,12 +667,11 @@ export class ChatSession {
       const meta = this._mediaMeta.get(id);
       const knownSize = opts.sizes?.[id] ?? meta?.size ?? 0;
       const mime = String(opts.mimes?.[id] || meta?.mime || "").toLowerCase();
-      const isVideo = mime.startsWith("video/");
       const senderPeerId =
         opts.senders?.[id] || meta?.senderPeerId || undefined;
       const largeLocked =
-        isVideo &&
-        isDeferredVideoSize(knownSize) &&
+        isGatedPlayableMime(mime) &&
+        isDeferredPlayableSize(knownSize) &&
         !opts.force &&
         !this._mediaUnlocked.has(id);
       if (largeLocked) {
@@ -1643,20 +1664,9 @@ export class ChatSession {
       // Any peer (including host) keeps a local copy only — no session-wide media CDN.
       this.putLocalMedia(mediaId, entry);
       this._fetching.delete(mediaId);
-      if (inc.meta.dmId) {
-        const largeVideo =
-          String(entry.mime || "")
-            .toLowerCase()
-            .startsWith("video/") &&
-          entry.size > VIDEO_AUTO_DOWNLOAD_BYTES;
-        if (!largeVideo) this.unlockMedia(mediaId);
-      } else {
-        const largeVideo =
-          String(entry.mime || "")
-            .toLowerCase()
-            .startsWith("video/") && isDeferredVideoSize(entry.size);
-        if (!largeVideo) this.unlockMedia(mediaId);
-      }
+      const largeGated =
+        isGatedPlayableMime(entry.mime) && isDeferredPlayableSize(entry.size);
+      if (!largeGated) this.unlockMedia(mediaId);
 
       this._incoming.delete(mediaId);
       this._send(
@@ -1904,23 +1914,32 @@ export class ChatSession {
 
 /**
  * @param {Blob[]} files
- * @returns {{ files: Blob[], mediaKind: "image" | "video" }}
+ * @returns {{ files: Blob[], mediaKind: "image" | "video" | "audio" }}
  */
 function classifyMediaBatch(files) {
   if (!files?.length) throw new Error("No media files");
   const videos = files.filter((f) => f.type.startsWith("video/"));
   const images = files.filter((f) => f.type.startsWith("image/"));
-  if (videos.length + images.length !== files.length) {
+  const audios = files.filter((f) => f.type.startsWith("audio/"));
+  if (videos.length + images.length + audios.length !== files.length) {
     throw new Error("Unsupported file type");
   }
-  if (videos.length && images.length) {
-    throw new Error("Cannot mix photos and video in one send");
+  const kinds =
+    (videos.length ? 1 : 0) + (images.length ? 1 : 0) + (audios.length ? 1 : 0);
+  if (kinds > 1) {
+    throw new Error("Cannot mix photos, video, and audio in one send");
   }
   if (videos.length > 1) {
     throw new Error("Send one video at a time");
   }
+  if (audios.length > 1) {
+    throw new Error("Send one audio at a time");
+  }
   if (videos.length === 1) {
     return { files: [videos[0]], mediaKind: "video" };
+  }
+  if (audios.length === 1) {
+    return { files: [audios[0]], mediaKind: "audio" };
   }
   if (images.length > MAX_ALBUM_ITEMS) {
     throw new Error(`Album max ${MAX_ALBUM_ITEMS} images`);

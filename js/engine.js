@@ -10,7 +10,7 @@ import { dmIdFor, mintId } from "./ids.js";
  *   senderPeerId: string,
  *   createdAt: number,
  *   editedAt?: number,
- *   kind: "text" | "sticker" | "media" | "album" | "video" | "system",
+ *   kind: "text" | "sticker" | "media" | "album" | "video" | "audio" | "system",
  *   text?: string,
  *   entities?: { type: string, offset: number, length: number, url?: string }[],
  *   replyTo?: string,
@@ -267,6 +267,8 @@ export function applyHost(state, action, ctx) {
       ).toLowerCase();
       const asVideo =
         mediaKind === "video" || looksLikeVideoInfo(mediaInfo, mediaIds.length);
+      const asAudio =
+        mediaKind === "audio" || looksLikeAudioInfo(mediaInfo, mediaIds.length);
       if (!chatId || !next.groups[chatId]) {
         return { ok: false, error: "Unknown group" };
       }
@@ -281,13 +283,18 @@ export function applyHost(state, action, ctx) {
         if (mediaIds.length !== 1) {
           return { ok: false, error: "Video must be a single clip" };
         }
+      } else if (asAudio) {
+        if (mediaIds.length !== 1) {
+          return { ok: false, error: "Audio must be a single clip" };
+        }
       } else if (mediaIds.length > MAX_ALBUM_ITEMS) {
         return { ok: false, error: `Album max ${MAX_ALBUM_ITEMS} images` };
       }
       const caption = String(action.text ?? action.caption ?? "");
-      const kind =
-        asVideo
-          ? /** @type {const} */ ("video")
+      const kind = asVideo
+        ? /** @type {const} */ ("video")
+        : asAudio
+          ? /** @type {const} */ ("audio")
           : mediaIds.length === 1
             ? /** @type {const} */ ("media")
             : /** @type {const} */ ("album");
@@ -744,11 +751,19 @@ export function applyDm(dmState, selfPeerId, action, opts = {}) {
         mediaKind === "video" ||
         action.message?.kind === "video" ||
         looksLikeVideoInfo(mediaInfo, mediaIds.length);
+      const asAudio =
+        mediaKind === "audio" ||
+        action.message?.kind === "audio" ||
+        looksLikeAudioInfo(mediaInfo, mediaIds.length);
       if (!dmId) return { ok: false, error: "Unknown DM" };
       if (!mediaIds.length) return { ok: false, error: "Missing media" };
       if (asVideo) {
         if (mediaIds.length !== 1) {
           return { ok: false, error: "Video must be a single clip" };
+        }
+      } else if (asAudio) {
+        if (mediaIds.length !== 1) {
+          return { ok: false, error: "Audio must be a single clip" };
         }
       } else if (mediaIds.length > MAX_ALBUM_ITEMS) {
         return { ok: false, error: `Album max ${MAX_ALBUM_ITEMS} images` };
@@ -778,8 +793,14 @@ export function applyDm(dmState, selfPeerId, action, opts = {}) {
       const caption = String(
         action.text ?? action.caption ?? action.message?.text ?? "",
       );
-      const kind = /** @type {"media" | "album" | "video"} */ (
-        asVideo ? "video" : mediaIds.length === 1 ? "media" : "album"
+      const kind = /** @type {"media" | "album" | "video" | "audio"} */ (
+        asVideo
+          ? "video"
+          : asAudio
+            ? "audio"
+            : mediaIds.length === 1
+              ? "media"
+              : "album"
       );
       /** @type {Message} */
       const msg = action.message
@@ -1012,6 +1033,12 @@ function previewText(last) {
   ) {
     return last.text?.trim() ? last.text : "Video";
   }
+  if (
+    last.kind === "audio" ||
+    looksLikeAudioInfo(last.mediaInfo, last.mediaIds?.length || 0)
+  ) {
+    return last.text?.trim() ? last.text : "Audio";
+  }
   if (last.kind === "media") {
     return last.text?.trim() ? last.text : "Photo";
   }
@@ -1073,6 +1100,15 @@ function normalizeMediaInfo(raw, len) {
 function looksLikeVideoInfo(mediaInfo, count) {
   if (count !== 1 || !mediaInfo?.[0]?.mime) return false;
   return String(mediaInfo[0].mime).toLowerCase().startsWith("video/");
+}
+
+/**
+ * @param {{ mime?: string }[] | undefined} mediaInfo
+ * @param {number} count
+ */
+function looksLikeAudioInfo(mediaInfo, count) {
+  if (count !== 1 || !mediaInfo?.[0]?.mime) return false;
+  return String(mediaInfo[0].mime).toLowerCase().startsWith("audio/");
 }
 
 /** @param {HostState} state @param {string} peerId */

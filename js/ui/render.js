@@ -280,6 +280,57 @@ export function renderThread(
         text.append(renderEntities(msg.text, msg.entities));
         bubble.append(text);
       }
+    } else if (isAudioMessage(msg, opts) && msg.mediaIds?.length) {
+      const wrap = document.createElement("div");
+      wrap.className = "bubble__audio";
+      const mid = msg.mediaIds[0];
+      const info = msg.mediaInfo?.[0];
+      const size = Number(info?.size) || 0;
+      const outgoing = msg.senderPeerId === selfPeerId;
+      const mime = info?.mime;
+      const url =
+        typeof opts.getPlayableMediaUrl === "function"
+          ? opts.getPlayableMediaUrl(mid, { size, mime, outgoing })
+          : typeof opts.getMediaUrl === "function"
+            ? opts.getMediaUrl(mid)
+            : null;
+      const needsDownload =
+        !outgoing && size > VIDEO_AUTO_DOWNLOAD_BYTES && !url;
+      if (url) {
+        const audio = document.createElement("audio");
+        audio.className = "media-audio";
+        audio.src = url;
+        audio.controls = true;
+        audio.preload = "metadata";
+        wrap.append(audio);
+      } else if (needsDownload || size > VIDEO_AUTO_DOWNLOAD_BYTES) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "video-download audio-download";
+        btn.innerHTML = `<span class="video-download__icon">♪</span><span class="video-download__label">Download audio</span><span class="video-download__size"></span>`;
+        const sizeEl = btn.querySelector(".video-download__size");
+        if (sizeEl) {
+          sizeEl.textContent = size ? formatBytes(size) : "";
+        }
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          opts.onDownloadMedia?.(mid);
+        });
+        wrap.append(btn);
+      } else {
+        const ph = document.createElement("div");
+        ph.className = "media-placeholder";
+        ph.textContent = size ? `Audio… ${formatBytes(size)}` : "Audio…";
+        wrap.append(ph);
+      }
+      bubble.append(wrap);
+      bubble.classList.add("bubble--audio");
+      if (msg.text) {
+        const text = document.createElement("div");
+        text.className = "bubble__text";
+        text.append(renderEntities(msg.text, msg.entities));
+        bubble.append(text);
+      }
     } else if (
       (msg.kind === "media" || msg.kind === "album") &&
       msg.mediaIds?.length
@@ -343,7 +394,9 @@ export function renderThread(
         msg.kind === "media" ||
         msg.kind === "album" ||
         msg.kind === "video" ||
-        isVideoMessage(msg, opts))
+        msg.kind === "audio" ||
+        isVideoMessage(msg, opts) ||
+        isAudioMessage(msg, opts))
     ) {
       const checks = document.createElement("span");
       checks.className = "checks";
@@ -436,12 +489,32 @@ function isVideoMessage(msg, opts = {}) {
   return mime.startsWith("video/");
 }
 
+/**
+ * Audio bubble even when kind was wrongly stored as "media" (mime says audio/*).
+ * @param {import("../engine.js").Message | undefined} msg
+ * @param {{ getMediaMime?: (mediaId: string) => string | null }} [opts]
+ */
+function isAudioMessage(msg, opts = {}) {
+  if (!msg?.mediaIds?.length) return false;
+  if (msg.kind === "audio") return true;
+  if (msg.kind !== "media" || msg.mediaIds.length !== 1) return false;
+  const mid = msg.mediaIds[0];
+  const fromInfo = msg.mediaInfo?.[0]?.mime;
+  const fromStore =
+    typeof opts.getMediaMime === "function" ? opts.getMediaMime(mid) : null;
+  const mime = String(fromInfo || fromStore || "").toLowerCase();
+  return mime.startsWith("audio/");
+}
+
 /** @param {import("../engine.js").Message | undefined} msg */
 function quotePreview(msg) {
   if (!msg) return "Original message";
   if (msg.kind === "sticker") return "Sticker";
   if (msg.kind === "video" || isVideoMessage(msg)) {
     return msg.text?.trim() || "Video";
+  }
+  if (msg.kind === "audio" || isAudioMessage(msg)) {
+    return msg.text?.trim() || "Audio";
   }
   if (msg.kind === "media") return msg.text?.trim() || "Photo";
   if (msg.kind === "album") return msg.text?.trim() || "Album";

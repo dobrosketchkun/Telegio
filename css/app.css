@@ -1043,6 +1043,23 @@ textarea {
   background: #000;
 }
 
+.bubble__audio {
+  max-width: 280px;
+  min-width: 200px;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.media-audio {
+  width: 100%;
+  display: block;
+  min-height: 40px;
+}
+
+.audio-download {
+  min-height: 100px;
+}
+
 .video-download {
   display: flex;
   flex-direction: column;
@@ -1108,7 +1125,8 @@ textarea {
   opacity: 0.75;
 }
 
-.attach-pending__thumb--video {
+.attach-pending__thumb--video,
+.attach-pending__thumb--audio {
   display: grid;
   place-items: center;
   background: #1a1a1a;
