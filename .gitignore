@@ -1,0 +1,34 @@
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Env / secrets
+.env
+.env.*
+*.pem
+credentials.json
+
+# Logs / caches
+*.log
+.cache/
+tmp/
+.tmp/
+
+# Node (future-proof)
+node_modules/
+dist/
+
+# Local reference material (not for Pages)
+.temporary_for_implementation/
+
+# Misc
+*.local
+.cursor/

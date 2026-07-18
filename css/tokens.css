@@ -1,0 +1,42 @@
+:root {
+  --font-ui: "Segoe UI", "Roboto", "Helvetica Neue", sans-serif;
+
+  --bg-app: #e7ebf0;
+  --bg-sidebar: #ffffff;
+  --bg-chat: #8ea9c1;
+  --bg-chat-pattern: rgba(255, 255, 255, 0.06);
+  --bg-header: #ffffff;
+  --bg-compose: #ffffff;
+  --bg-input: #ffffff;
+  --bg-hover: #f4f4f5;
+  --bg-active: #f0f2f5;
+
+  --bubble-in: #ffffff;
+  --bubble-out: #effdde;
+  --bubble-meta: #a0acb6;
+  --bubble-out-meta: #4fae4e;
+
+  --text-primary: #000000;
+  --text-secondary: #707579;
+  --text-link: #3390ec;
+  --text-on-accent: #ffffff;
+
+  --accent: #3390ec;
+  --accent-soft: #e3f1fd;
+  --border: #dfe1e5;
+  --unread: #3390ec;
+  --danger: #e53935;
+
+  --name-0: #c4515d;
+  --name-1: #3390ec;
+  --name-2: #35a06e;
+  --name-3: #d48b1f;
+  --name-4: #8b6bc7;
+
+  --radius-bubble: 12px;
+  --sidebar-width: 340px;
+  --header-height: 56px;
+  --compose-min-height: 52px;
+
+  --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.08);
+}

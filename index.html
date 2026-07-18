@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Ephemeral chat — fixture</title>
+    <link rel="stylesheet" href="./css/tokens.css" />
+    <link rel="stylesheet" href="./css/app.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside class="sidebar">
+        <div class="sidebar__top">
+          <span class="sidebar__badge">Fixture</span>
+          <span class="sidebar__title" id="session-label">Session</span>
+        </div>
+        <ul class="chat-list" id="chat-list"></ul>
+      </aside>
+
+      <section class="main">
+        <header class="chat-header" id="chat-header"></header>
+        <div class="messages" id="messages"></div>
+        <form class="compose" id="compose-form">
+          <textarea
+            class="compose__input"
+            id="compose-input"
+            rows="1"
+            placeholder="Write a message..."
+            autocomplete="off"
+          ></textarea>
+          <button class="compose__send" id="compose-send" type="submit" aria-label="Send">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+              <path d="M3.4 20.4l17.45-7.48a1 1 0 000-1.84L3.4 3.6a.993.993 0 00-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87.99l.01 4.61c0 .71.73 1.2 1.39.91z" />
+            </svg>
+          </button>
+        </form>
+      </section>
+    </div>
+
+    <div id="boot-banner" class="boot-banner" hidden></div>
+
+    <script type="module" src="./js/ui/app.js"></script>
+  </body>
+</html>
