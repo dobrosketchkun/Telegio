@@ -358,9 +358,12 @@ function paint() {
       onOpenMedia: (url) => openLightbox(url),
       onDownloadMedia: (mediaId) => {
         if (mode === "online" && session) {
-          setUploadStatus("Downloading video…");
           session.unlockMedia(mediaId);
           const meta = session.getMediaMeta(mediaId);
+          const size = meta?.size ? formatBytes(meta.size) : "";
+          setUploadStatus(
+            size ? `Downloading… 0% · 0 B / ${size}` : "Downloading…",
+          );
           session.ensureMedia([mediaId], {
             force: true,
             sizes: meta?.size != null ? { [mediaId]: meta.size } : undefined,
@@ -613,6 +616,7 @@ async function startOnlineHost(displayName, title) {
       if (els.connStatus) els.connStatus.textContent = s;
     },
     onError: (m) => showBanner(m, false),
+    onProgress: (label) => setUploadStatus(label || ""),
   });
   enterAppShell({ badge: "Host", status: "Connecting…" });
   try {
@@ -637,6 +641,7 @@ async function startOnlineGuest(displayName, sessionId) {
       if (els.connStatus) els.connStatus.textContent = s;
     },
     onError: (m) => showBanner(m, false),
+    onProgress: (label) => setUploadStatus(label || ""),
   });
   enterAppShell({ badge: "Guest", status: "Connecting…" });
   try {

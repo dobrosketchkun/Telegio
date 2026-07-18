@@ -56,6 +56,7 @@ import { loadTrystero, roomConfig } from "./trystero.js";
  *   onChange: () => void,
  *   onStatus: (status: string) => void,
  *   onError: (message: string) => void,
+ *   onProgress?: (label: string) => void,
  * }} SessionHooks
  */
 
@@ -682,8 +683,36 @@ export class ChatSession {
 
       this._fetching.add(id);
       log("media", "request P2P", id, "→", target);
+      const sizeLabel = knownSize ? formatBytes(knownSize) : "";
+      this.hooks.onProgress?.(
+        sizeLabel ? `Downloading… 0% · 0 B / ${sizeLabel}` : "Downloading…",
+      );
       this._send(encodeFrame("media-request", { mediaId: id }), target);
     }
+  }
+
+  /**
+   * @param {string} mediaId
+   * @param {{ total?: number, size?: number, chunks?: string[] }} inc
+   */
+  _reportDownloadProgress(mediaId, inc) {
+    const total = Number(inc.total) || 0;
+    if (!total) return;
+    let have = 0;
+    for (let i = 0; i < total; i++) {
+      if (typeof inc.chunks?.[i] === "string" && inc.chunks[i]) have += 1;
+    }
+    const size =
+      Number(inc.size) ||
+      this._mediaMeta.get(mediaId)?.size ||
+      0;
+    const pct = Math.min(100, Math.round((have / total) * 100));
+    const got = size ? Math.round((have / total) * size) : 0;
+    this.hooks.onProgress?.(
+      size
+        ? `Downloading ${pct}% · ${formatBytes(got)} / ${formatBytes(size)}`
+        : `Downloading ${pct}%`,
+    );
   }
 
   /**
@@ -1469,10 +1498,18 @@ export class ChatSession {
         meta: body,
         chunks: /** @type {string[]} */ ([]),
         total: Number.isFinite(total) && total > 0 ? total : 0,
+        size: Number(body.size) || 0,
         from: peerId,
         completeSignaled: false,
         assembleTimer: null,
+        lastProgressAt: 0,
       });
+      const offerSize = Number(body.size) || 0;
+      if (offerSize) {
+        this.hooks.onProgress?.(
+          `Downloading… 0% · 0 B / ${formatBytes(offerSize)}`,
+        );
+      }
       return;
     }
 
@@ -1484,7 +1521,20 @@ export class ChatSession {
       if (!Number.isInteger(index) || index < 0) return;
       if (typeof body.data !== "string" || !body.data) return;
       if (Number.isFinite(total) && total > 0) inc.total = total;
+      const wasMissing = typeof inc.chunks[index] !== "string" || !inc.chunks[index];
       inc.chunks[index] = body.data;
+      if (wasMissing) {
+        const now = Date.now();
+        if (
+          index === 0 ||
+          index + 1 === inc.total ||
+          (index + 1) % 8 === 0 ||
+          now - (inc.lastProgressAt || 0) > 200
+        ) {
+          inc.lastProgressAt = now;
+          this._reportDownloadProgress(mediaId, inc);
+        }
+      }
       if (inc.completeSignaled) this._tryAssembleIncoming(mediaId, peerId);
       return;
     }
@@ -1535,6 +1585,7 @@ export class ChatSession {
     if (type === "media-reject") {
       const reason = body.reason || "Media rejected";
       this._fetching.delete(mediaId);
+      this.hooks.onProgress?.("");
       warn("media", "rejected", mediaId, reason);
       this.hooks.onError(`${reason}. ${MEDIA_TURN_HINT}`);
     }
@@ -1613,6 +1664,10 @@ export class ChatSession {
         peerId,
       );
       log("media", "assembled", mediaId, entry.size, `${total} chunks`);
+      this.hooks.onProgress?.(
+        `Downloading 100% · ${formatBytes(entry.size)} / ${formatBytes(entry.size)}`,
+      );
+      this.hooks.onProgress?.("");
       this.hooks.onChange();
       return true;
     } catch (e) {
@@ -1635,6 +1690,7 @@ export class ChatSession {
     if (inc?.assembleTimer != null) clearTimeout(inc.assembleTimer);
     this._incoming.delete(mediaId);
     this._fetching.delete(mediaId);
+    this.hooks.onProgress?.("");
     warn("media", "assemble failed", mediaId, reason);
     this._send(
       encodeFrame("media-complete", {
