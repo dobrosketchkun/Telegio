@@ -1,4 +1,6 @@
+import { VIDEO_AUTO_DOWNLOAD_BYTES } from "../constants.js";
 import { isFullyDelivered, renderEntities } from "../entities.js";
+import { formatBytes } from "../media.js";
 import { stickerFileUrl } from "../stickers.js";
 
 /**
@@ -71,6 +73,7 @@ export function renderChatList(root, chats, activeId, unread, onSelect) {
  *   onEdit?: (messageId: string) => void,
  *   getMediaUrl?: (mediaId: string) => string | null,
  *   onOpenMedia?: (url: string) => void,
+ *   onDownloadMedia?: (mediaId: string) => void,
  * }} [opts]
  */
 export function renderThread(
@@ -218,6 +221,48 @@ export function renderThread(
       media.append(img);
       bubble.append(media);
       bubble.classList.add("bubble--sticker");
+    } else if (msg.kind === "video" && msg.mediaIds?.length) {
+      const wrap = document.createElement("div");
+      wrap.className = "bubble__video";
+      const mid = msg.mediaIds[0];
+      const info = msg.mediaInfo?.[0];
+      const size = Number(info?.size) || 0;
+      const url =
+        typeof opts.getMediaUrl === "function" ? opts.getMediaUrl(mid) : null;
+      if (url) {
+        const video = document.createElement("video");
+        video.className = "media-video";
+        video.src = url;
+        video.controls = true;
+        video.playsInline = true;
+        video.preload = "metadata";
+        wrap.append(video);
+      } else if (size > VIDEO_AUTO_DOWNLOAD_BYTES) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "video-download";
+        btn.innerHTML = `<span class="video-download__icon">▶</span><span class="video-download__label">Download video</span><span class="video-download__size"></span>`;
+        btn.querySelector(".video-download__size").textContent =
+          formatBytes(size);
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          opts.onDownloadMedia?.(mid);
+        });
+        wrap.append(btn);
+      } else {
+        const ph = document.createElement("div");
+        ph.className = "media-placeholder";
+        ph.textContent = size ? `Video… ${formatBytes(size)}` : "Video…";
+        wrap.append(ph);
+      }
+      bubble.append(wrap);
+      bubble.classList.add("bubble--video");
+      if (msg.text) {
+        const text = document.createElement("div");
+        text.className = "bubble__text";
+        text.append(renderEntities(msg.text, msg.entities));
+        bubble.append(text);
+      }
     } else if (
       (msg.kind === "media" || msg.kind === "album") &&
       msg.mediaIds?.length
@@ -279,7 +324,8 @@ export function renderThread(
       (msg.kind === "text" ||
         msg.kind === "sticker" ||
         msg.kind === "media" ||
-        msg.kind === "album")
+        msg.kind === "album" ||
+        msg.kind === "video")
     ) {
       const checks = document.createElement("span");
       checks.className = "checks";
@@ -361,6 +407,7 @@ function quotePreview(msg) {
   if (msg.kind === "sticker") return "Sticker";
   if (msg.kind === "media") return msg.text?.trim() || "Photo";
   if (msg.kind === "album") return msg.text?.trim() || "Album";
+  if (msg.kind === "video") return msg.text?.trim() || "Video";
   return msg.text || "Original message";
 }
 

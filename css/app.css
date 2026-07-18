@@ -1029,6 +1029,73 @@ textarea {
   font-size: 20px;
 }
 
+.bubble__video {
+  max-width: 280px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #000;
+}
+
+.media-video {
+  width: 100%;
+  max-height: 320px;
+  display: block;
+  background: #000;
+}
+
+.video-download {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 140px;
+  min-width: 180px;
+  border: 0;
+  background: linear-gradient(160deg, #2a2a2a, #111);
+  color: #fff;
+  cursor: pointer;
+  padding: 20px 16px;
+  font: inherit;
+}
+
+.video-download:hover {
+  background: linear-gradient(160deg, #333, #161616);
+}
+
+.video-download__icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.18);
+  display: grid;
+  place-items: center;
+  font-size: 16px;
+  padding-left: 2px;
+}
+
+.video-download__label {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.video-download__size {
+  font-size: 12px;
+  opacity: 0.75;
+}
+
+.attach-pending__thumb--video {
+  display: grid;
+  place-items: center;
+  background: #1a1a1a;
+  color: #fff;
+  font-size: 11px;
+  text-align: center;
+  padding: 4px;
+  line-height: 1.2;
+}
+
 .lightbox {
   position: fixed;
   inset: 0;

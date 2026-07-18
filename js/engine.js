@@ -10,13 +10,14 @@ import { dmIdFor, mintId } from "./ids.js";
  *   senderPeerId: string,
  *   createdAt: number,
  *   editedAt?: number,
- *   kind: "text" | "sticker" | "media" | "album" | "system",
+ *   kind: "text" | "sticker" | "media" | "album" | "video" | "system",
  *   text?: string,
  *   entities?: { type: string, offset: number, length: number, url?: string }[],
  *   replyTo?: string,
  *   delivery?: { ackedBy: string[] },
  *   sticker?: { pack: string, stickerId: string },
  *   mediaIds?: string[],
+ *   mediaInfo?: { size: number, mime?: string, duration?: number, width?: number, height?: number }[],
  * }} Message
  * @typedef {{
  *   app: string,
@@ -260,6 +261,9 @@ export function applyHost(state, action, ctx) {
     case "send-media": {
       const chatId = action.chatId;
       const mediaIds = normalizeMediaIds(action.mediaIds);
+      const mediaKind = String(
+        action.mediaKind || action.kindHint || "",
+      ).toLowerCase();
       if (!chatId || !next.groups[chatId]) {
         return { ok: false, error: "Unknown group" };
       }
@@ -270,19 +274,29 @@ export function applyHost(state, action, ctx) {
       if (!mediaIds.length) {
         return { ok: false, error: "Missing media" };
       }
-      if (mediaIds.length > MAX_ALBUM_ITEMS) {
+      if (mediaKind === "video") {
+        if (mediaIds.length !== 1) {
+          return { ok: false, error: "Video must be a single clip" };
+        }
+      } else if (mediaIds.length > MAX_ALBUM_ITEMS) {
         return { ok: false, error: `Album max ${MAX_ALBUM_ITEMS} images` };
       }
       const caption = String(action.text ?? action.caption ?? "");
+      const kind =
+        mediaKind === "video"
+          ? /** @type {const} */ ("video")
+          : mediaIds.length === 1
+            ? /** @type {const} */ ("media")
+            : /** @type {const} */ ("album");
+      const mediaInfo = normalizeMediaInfo(action.mediaInfo, mediaIds.length);
       const msg = {
         id: mintId("m"),
         chatId,
         senderPeerId: actor,
         createdAt: Date.now(),
-        kind: /** @type {const} */ (
-          mediaIds.length === 1 ? "media" : "album"
-        ),
+        kind,
         mediaIds,
+        mediaInfo,
         text: caption.trim() ? caption : undefined,
         entities: Array.isArray(action.entities) ? action.entities : undefined,
         replyTo: action.replyTo,
@@ -714,9 +728,21 @@ export function applyDm(dmState, selfPeerId, action, opts = {}) {
       const mediaIds = normalizeMediaIds(
         action.mediaIds || action.message?.mediaIds,
       );
+      const mediaKind = String(
+        action.mediaKind ||
+          action.kindHint ||
+          action.message?.kind ||
+          "",
+      ).toLowerCase();
+      const asVideo =
+        mediaKind === "video" || action.message?.kind === "video";
       if (!dmId) return { ok: false, error: "Unknown DM" };
       if (!mediaIds.length) return { ok: false, error: "Missing media" };
-      if (mediaIds.length > MAX_ALBUM_ITEMS) {
+      if (asVideo) {
+        if (mediaIds.length !== 1) {
+          return { ok: false, error: "Video must be a single clip" };
+        }
+      } else if (mediaIds.length > MAX_ALBUM_ITEMS) {
         return { ok: false, error: `Album max ${MAX_ALBUM_ITEMS} images` };
       }
 
@@ -744,8 +770,12 @@ export function applyDm(dmState, selfPeerId, action, opts = {}) {
       const caption = String(
         action.text ?? action.caption ?? action.message?.text ?? "",
       );
-      const kind = /** @type {"media" | "album"} */ (
-        mediaIds.length === 1 ? "media" : "album"
+      const kind = /** @type {"media" | "album" | "video"} */ (
+        asVideo ? "video" : mediaIds.length === 1 ? "media" : "album"
+      );
+      const mediaInfo = normalizeMediaInfo(
+        action.mediaInfo || action.message?.mediaInfo,
+        mediaIds.length,
       );
       /** @type {Message} */
       const msg = action.message
@@ -755,6 +785,7 @@ export function applyDm(dmState, selfPeerId, action, opts = {}) {
             senderPeerId,
             kind,
             mediaIds,
+            mediaInfo: mediaInfo || action.message.mediaInfo,
             text: caption.trim() ? caption : action.message.text,
             delivery: action.message.delivery || { ackedBy: [] },
           }
@@ -765,6 +796,7 @@ export function applyDm(dmState, selfPeerId, action, opts = {}) {
             createdAt: Date.now(),
             kind,
             mediaIds,
+            mediaInfo,
             text: caption.trim() ? caption : undefined,
             entities: Array.isArray(action.entities)
               ? action.entities
@@ -976,6 +1008,9 @@ function previewText(last) {
   if (last.kind === "album") {
     return last.text?.trim() ? last.text : "Album";
   }
+  if (last.kind === "video") {
+    return last.text?.trim() ? last.text : "Video";
+  }
   return last.text || "Message";
 }
 
@@ -989,6 +1024,30 @@ function normalizeMediaIds(raw) {
     if (s && !ids.includes(s)) ids.push(s);
   }
   return ids;
+}
+
+/**
+ * @param {unknown} raw
+ * @param {number} len
+ * @returns {{ size: number, mime?: string, duration?: number, width?: number, height?: number }[] | undefined}
+ */
+function normalizeMediaInfo(raw, len) {
+  if (!Array.isArray(raw) || !len) return undefined;
+  /** @type {{ size: number, mime?: string, duration?: number, width?: number, height?: number }[]} */
+  const out = [];
+  for (let i = 0; i < len; i++) {
+    const item = raw[i];
+    if (!item || typeof item !== "object") continue;
+    const size = Number(/** @type {{ size?: number }} */ (item).size) || 0;
+    out.push({
+      size,
+      mime: /** @type {{ mime?: string }} */ (item).mime,
+      duration: /** @type {{ duration?: number }} */ (item).duration,
+      width: /** @type {{ width?: number }} */ (item).width,
+      height: /** @type {{ height?: number }} */ (item).height,
+    });
+  }
+  return out.length ? out : undefined;
 }
 
 /** @param {HostState} state @param {string} peerId */

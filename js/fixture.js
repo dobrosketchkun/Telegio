@@ -7,7 +7,7 @@ import {
 } from "./engine.js";
 import { parseMarkdownLite } from "./entities.js";
 import { dmIdFor } from "./ids.js";
-import { makeFixtureImage, mintMediaId } from "./media.js";
+import { makeFixtureImage, makeFixtureVideo, mintMediaId } from "./media.js";
 
 const PEERS = {
   host: {
@@ -178,7 +178,7 @@ export async function buildFixture(pack = null) {
     {
       type: "send-text",
       chatId: notesId,
-      text: "Phase 4 fixture: stickers + photos + albums",
+      text: "Phase 5 fixture: stickers + photos + albums + video",
     },
     { actorPeerId: PEERS.mira.peerId },
   );
@@ -333,6 +333,72 @@ export async function buildFixture(pack = null) {
   });
   if (!dr.ok) throw new Error(dr.error);
   dmState = dr.state;
+
+  const clip = await makeFixtureVideo("Clip");
+  if (clip) {
+    const midVid = mintMediaId();
+    const midVidDm = mintMediaId();
+    media.set(midVid, {
+      blob: clip.blob,
+      mime: clip.mime,
+      size: clip.size,
+      width: clip.width,
+      height: clip.height,
+      duration: clip.duration,
+      senderPeerId: PEERS.self.peerId,
+    });
+    media.set(midVidDm, {
+      blob: clip.blob,
+      mime: clip.mime,
+      size: clip.size,
+      width: clip.width,
+      height: clip.height,
+      duration: clip.duration,
+      senderPeerId: PEERS.self.peerId,
+    });
+
+    const vidInfo = [
+      {
+        size: clip.size,
+        mime: clip.mime,
+        duration: clip.duration,
+        width: clip.width,
+        height: clip.height,
+      },
+    ];
+    r = applyHost(
+      hostState,
+      {
+        type: "send-media",
+        chatId: groupId,
+        mediaIds: [midVid],
+        mediaInfo: vidInfo,
+        mediaKind: "video",
+        text: "Short clip",
+      },
+      { actorPeerId: PEERS.self.peerId },
+    );
+    if (!r.ok) throw new Error(r.error);
+    hostState = r.state;
+
+    dr = applyDm(dmState, PEERS.self.peerId, {
+      type: "dm-send-media",
+      dmId,
+      mediaIds: [midVidDm],
+      mediaInfo: vidInfo,
+      mediaKind: "video",
+      text: "DM clip",
+    });
+    if (!dr.ok) throw new Error(dr.error);
+    dmState = dr.state;
+  } else {
+    const sys = appendSystemToGroups(
+      hostState,
+      "Video fixture skipped (MediaRecorder unavailable)",
+      [groupId],
+    );
+    hostState = sys.state;
+  }
 
   return {
     selfPeerId: PEERS.self.peerId,

@@ -23,4 +23,11 @@ export const MEDIA_JPEG_QUALITY = 0.82;
 export const MEDIA_CHUNK_BYTES = 16 * 1024;
 
 /** @type {number} Host group media store budget (bytes). */
-export const HOST_MEDIA_BUDGET_BYTES = 32 * 1024 * 1024;
+export const HOST_MEDIA_BUDGET_BYTES = 128 * 1024 * 1024;
+
+/** @type {number} Auto-fetch / auto-play videos at or under this size. */
+export const VIDEO_AUTO_DOWNLOAD_BYTES = 10 * 1024 * 1024;
+
+/** TURN / large-payload guidance shown on transfer failures. */
+export const MEDIA_TURN_HINT =
+  "Transfer failed — VPN/strict NAT often blocks large media. Try without VPN, or set localStorage ephchat.turnServers (see trystero.js).";

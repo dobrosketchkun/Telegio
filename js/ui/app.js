@@ -12,7 +12,7 @@ import { MAX_ALBUM_ITEMS } from "../constants.js";
 import { buildFixture } from "../fixture.js";
 import { isFixtureMode, readJoinSessionId } from "../invite.js";
 import { log } from "../log.js";
-import { compressImage, mintMediaId } from "../media.js";
+import { compressImage, mintMediaId, prepareVideo } from "../media.js";
 import { selfCheckEnvelope } from "../protocol.js";
 import { ChatSession } from "../session.js";
 import { ensureFixturePacks } from "../stickers.js";
@@ -93,7 +93,7 @@ log("boot", {
   href: location.href,
   joinId,
   fixture: isFixtureMode(),
-  build: "phase4-media",
+  build: "phase5-video",
 });
 
 const picker = createPicker(els.picker, {
@@ -187,7 +187,9 @@ function setReply(messageId) {
         ? msg.text?.trim() || "Photo"
         : msg.kind === "album"
           ? msg.text?.trim() || "Album"
-          : msg.text || "";
+          : msg.kind === "video"
+            ? msg.text?.trim() || "Video"
+            : msg.text || "";
   els.replyBar.hidden = false;
   els.composeInput.focus();
 }
@@ -334,13 +336,40 @@ function paint() {
       onEdit: (messageId) => setEdit(messageId),
       getMediaUrl: (mediaId) => resolveMediaUrl(mediaId),
       onOpenMedia: (url) => openLightbox(url),
+      onDownloadMedia: (mediaId) => {
+        if (mode === "online" && session) {
+          setUploadStatus("Downloading video…");
+          session.ensureMedia([mediaId], { force: true });
+          paint();
+        }
+      },
     },
   );
 
-  // Pull missing group media while viewing
+  // Pull missing group media while viewing (large videos wait for tap)
   if (mode === "online" && session && thread?.kind === "group") {
     for (const msg of thread.messages) {
-      if (msg.mediaIds?.length) session.ensureMedia(msg.mediaIds);
+      if (!msg.mediaIds?.length) continue;
+      session.rememberMediaInfo(msg);
+      const sizes = Object.create(null);
+      msg.mediaIds.forEach((id, i) => {
+        const sz = msg.mediaInfo?.[i]?.size;
+        if (sz != null) sizes[id] = sz;
+      });
+      session.ensureMedia(msg.mediaIds, { sizes });
+    }
+    // Clear download status once blobs arrive
+    if (
+      els.uploadStatus &&
+      !els.uploadStatus.hidden &&
+      /Downloading/i.test(els.uploadStatus.textContent || "")
+    ) {
+      const waiting = thread.messages.some(
+        (m) =>
+          m.kind === "video" &&
+          m.mediaIds?.some((id) => !resolveMediaUrl(id)),
+      );
+      if (!waiting) setUploadStatus("");
     }
   }
 
@@ -725,10 +754,15 @@ function renderPendingStrip() {
   for (const p of pendingFiles) {
     const wrap = document.createElement("div");
     wrap.className = "attach-pending__thumb";
-    const img = document.createElement("img");
-    img.src = p.url;
-    img.alt = "";
-    wrap.append(img);
+    if (p.file.type.startsWith("video/")) {
+      wrap.classList.add("attach-pending__thumb--video");
+      wrap.textContent = "Video";
+    } else {
+      const img = document.createElement("img");
+      img.src = p.url;
+      img.alt = "";
+      wrap.append(img);
+    }
     els.attachPending.append(wrap);
   }
   const clear = document.createElement("button");
@@ -743,16 +777,51 @@ function renderPendingStrip() {
  * @param {FileList | File[]} list
  */
 function addPendingFiles(list) {
-  const files = [...list].filter((f) => f.type.startsWith("image/"));
+  const incoming = [...list].filter(
+    (f) => f.type.startsWith("image/") || f.type.startsWith("video/"),
+  );
+  if (!incoming.length) {
+    showBanner("Only images or video", false);
+    return;
+  }
+  const hasVideo = incoming.some((f) => f.type.startsWith("video/"));
+  const hasImage = incoming.some((f) => f.type.startsWith("image/"));
+  if (hasVideo && hasImage) {
+    showBanner("Cannot mix photos and video", false);
+    return;
+  }
+  const pendingHasVideo = pendingFiles.some((p) =>
+    p.file.type.startsWith("video/"),
+  );
+  const pendingHasImage = pendingFiles.some((p) =>
+    p.file.type.startsWith("image/"),
+  );
+
+  if (hasVideo) {
+    if (incoming.filter((f) => f.type.startsWith("video/")).length > 1) {
+      showBanner("Send one video at a time", false);
+      return;
+    }
+    clearPendingFiles();
+    const file = incoming.find((f) => f.type.startsWith("video/"));
+    if (file) pendingFiles.push({ file, url: URL.createObjectURL(file) });
+    renderPendingStrip();
+    return;
+  }
+
+  if (pendingHasVideo) clearPendingFiles();
+  if (pendingHasImage === false && pendingFiles.length) clearPendingFiles();
+
   const room = MAX_ALBUM_ITEMS - pendingFiles.length;
   if (room <= 0) {
     showBanner(`Max ${MAX_ALBUM_ITEMS} photos`, false);
     return;
   }
-  for (const file of files.slice(0, room)) {
+  const images = incoming.filter((f) => f.type.startsWith("image/"));
+  for (const file of images.slice(0, room)) {
     pendingFiles.push({ file, url: URL.createObjectURL(file) });
   }
-  if (files.length > room) {
+  if (images.length > room) {
     showBanner(`Max ${MAX_ALBUM_ITEMS} photos — extra ignored`, false);
   }
   renderPendingStrip();
@@ -780,26 +849,54 @@ async function sendPendingMedia() {
   paint();
   try {
     if (mode === "fixture" && fixtureStore) {
-      setUploadStatus("Preparing photos…");
+      setUploadStatus("Preparing media…");
       if (!fixtureStore.media) fixtureStore.media = new Map();
+      const isVideo = files.length === 1 && files[0].type.startsWith("video/");
       /** @type {string[]} */
       const mediaIds = [];
       let i = 0;
       for (const file of files) {
         i += 1;
-        setUploadStatus(`Compressing ${i}/${files.length}…`);
-        const compressed = await compressImage(file);
-        const id = mintMediaId();
-        fixtureStore.media.set(id, {
-          blob: compressed.blob,
-          mime: compressed.mime,
-          size: compressed.size,
-          width: compressed.width,
-          height: compressed.height,
-          senderPeerId: fixtureStore.selfPeerId,
-        });
-        mediaIds.push(id);
+        if (isVideo) {
+          setUploadStatus("Preparing video…");
+          const prepared = await prepareVideo(file);
+          const id = mintMediaId();
+          fixtureStore.media.set(id, {
+            blob: prepared.blob,
+            mime: prepared.mime,
+            size: prepared.size,
+            width: prepared.width,
+            height: prepared.height,
+            duration: prepared.duration,
+            senderPeerId: fixtureStore.selfPeerId,
+          });
+          mediaIds.push(id);
+        } else {
+          setUploadStatus(`Compressing ${i}/${files.length}…`);
+          const compressed = await compressImage(file);
+          const id = mintMediaId();
+          fixtureStore.media.set(id, {
+            blob: compressed.blob,
+            mime: compressed.mime,
+            size: compressed.size,
+            width: compressed.width,
+            height: compressed.height,
+            senderPeerId: fixtureStore.selfPeerId,
+          });
+          mediaIds.push(id);
+        }
       }
+      const mediaKind = isVideo ? "video" : undefined;
+      const mediaInfoOut = mediaIds.map((id) => {
+        const e = fixtureStore.media.get(id);
+        return {
+          size: e?.size || 0,
+          mime: e?.mime,
+          duration: e?.duration,
+          width: e?.width,
+          height: e?.height,
+        };
+      });
       if (thread.kind === "group") {
         const r = applyHost(
           fixtureStore.hostState,
@@ -807,6 +904,8 @@ async function sendPendingMedia() {
             type: "send-media",
             chatId: activeChatId,
             mediaIds,
+            mediaInfo: mediaInfoOut,
+            mediaKind,
             text: parsed.text || undefined,
             entities: parsed.entities.length ? parsed.entities : undefined,
             replyTo,
@@ -820,6 +919,8 @@ async function sendPendingMedia() {
           type: "dm-send-media",
           dmId: activeChatId,
           mediaIds,
+          mediaInfo: mediaInfoOut,
+          mediaKind,
           text: parsed.text || undefined,
           entities: parsed.entities.length ? parsed.entities : undefined,
           replyTo,
@@ -829,13 +930,15 @@ async function sendPendingMedia() {
       }
     } else if (session && !session.sessionEnded) {
       if (thread.kind === "group") {
-        const mediaIds = await session.uploadGroupMedia(files, {
+        const uploaded = await session.uploadGroupMedia(files, {
           chatId: activeChatId,
           onProgress: setUploadStatus,
         });
         setUploadStatus("Sending…");
         session.sendGroupMedia(activeChatId, {
-          mediaIds,
+          mediaIds: uploaded.mediaIds,
+          mediaInfo: uploaded.mediaInfo,
+          mediaKind: uploaded.mediaKind,
           text: parsed.text || undefined,
           entities: parsed.entities.length ? parsed.entities : undefined,
           replyTo,

@@ -3,6 +3,8 @@ import {
   APP_VERSION,
   HOST_MEDIA_BUDGET_BYTES,
   MAX_ALBUM_ITEMS,
+  MEDIA_TURN_HINT,
+  VIDEO_AUTO_DOWNLOAD_BYTES,
 } from "./constants.js";
 import {
   addRosterPeer,
@@ -25,6 +27,7 @@ import {
   blobToBase64Chunks,
   compressImage,
   mintMediaId,
+  prepareVideo,
 } from "./media.js";
 import { decodeFrame, encodeFrame } from "./protocol.js";
 import { loadTrystero, roomConfig } from "./trystero.js";
@@ -35,6 +38,7 @@ import { loadTrystero, roomConfig } from "./trystero.js";
  *   size: number,
  *   width?: number,
  *   height?: number,
+ *   duration?: number,
  *   blob: Blob,
  *   senderPeerId: string,
  *   chatId?: string,
@@ -97,6 +101,8 @@ export class ChatSession {
     this._uploadWaiters = new Map();
     /** @type {Set<string>} */
     this._fetching = new Set();
+    /** @type {Map<string, { size: number, mime?: string, duration?: number }>} */
+    this._mediaMeta = new Map();
   }
 
   /**
@@ -375,110 +381,139 @@ export class ChatSession {
   }
 
   /**
-   * Compress + upload images to host store (or local if host).
+   * Compress/prepare + upload images or one video to host store (or local if host).
    * @param {Blob[]} files
    * @param {{ chatId?: string, onProgress?: (label: string) => void }} [opts]
-   * @returns {Promise<string[]>} mediaIds
+   * @returns {Promise<{ mediaIds: string[], mediaKind?: "video", mediaInfo?: object[] }>}
    */
   async uploadGroupMedia(files, opts = {}) {
-    if (!files?.length) throw new Error("No images");
-    if (files.length > MAX_ALBUM_ITEMS) {
-      throw new Error(`Album max ${MAX_ALBUM_ITEMS} images`);
-    }
+    const batch = classifyMediaBatch(files);
     const hostId = this.hostState ? getHostPeerId(this.hostState) : null;
     if (!hostId) throw new Error("No host");
 
     /** @type {string[]} */
     const mediaIds = [];
+    /** @type {object[]} */
+    const mediaInfo = [];
     let i = 0;
-    for (const file of files) {
+    for (const file of batch.files) {
       i += 1;
-      opts.onProgress?.(`Compressing ${i}/${files.length}…`);
-      const compressed = await compressImage(file);
+      const prepared = await this._prepareFile(file, batch.mediaKind, (label) =>
+        opts.onProgress?.(
+          `${label} ${i}/${batch.files.length}…`.replace(/\s+/g, " "),
+        ),
+      );
       const mediaId = mintMediaId();
       const entry = {
-        mime: compressed.mime,
-        size: compressed.size,
-        width: compressed.width,
-        height: compressed.height,
-        blob: compressed.blob,
+        mime: prepared.mime,
+        size: prepared.size,
+        width: prepared.width,
+        height: prepared.height,
+        duration: prepared.duration,
+        blob: prepared.blob,
         senderPeerId: this.selfPeerId,
         chatId: opts.chatId,
       };
 
       if (this.role === "host") {
-        this._hostAcceptMedia(mediaId, entry);
+        const ok = this._hostAcceptMedia(mediaId, entry);
+        if (!ok) throw new Error("Host media budget exceeded");
       } else {
-        opts.onProgress?.(`Uploading ${i}/${files.length}…`);
+        opts.onProgress?.(`Uploading ${i}/${batch.files.length}…`);
         await this._transferMediaTo(hostId, mediaId, entry, {
           chatId: opts.chatId,
         });
         this.putLocalMedia(mediaId, entry);
       }
       mediaIds.push(mediaId);
+      mediaInfo.push({
+        size: prepared.size,
+        mime: prepared.mime,
+        duration: prepared.duration,
+        width: prepared.width,
+        height: prepared.height,
+      });
     }
-    return mediaIds;
+    return {
+      mediaIds,
+      mediaInfo,
+      mediaKind: batch.mediaKind === "video" ? "video" : undefined,
+    };
   }
 
   /**
    * @param {string} chatId
-   * @param {{ mediaIds: string[], text?: string, entities?: object[], replyTo?: string }} media
+   * @param {{ mediaIds: string[], text?: string, entities?: object[], replyTo?: string, mediaKind?: string, mediaInfo?: object[] }} media
    */
   sendGroupMedia(chatId, media) {
     this.dispatchHostAction({
       type: "send-media",
       chatId,
       mediaIds: media.mediaIds,
+      mediaInfo: media.mediaInfo,
       text: media.text,
       entities: media.entities,
       replyTo: media.replyTo,
+      mediaKind: media.mediaKind,
     });
   }
 
   /**
-   * Compress, P2P transfer to DM peer, then dm-send-media.
+   * Compress/prepare, P2P transfer to DM peer, then dm-send-media.
    * @param {string} dmId
    * @param {Blob[]} files
    * @param {{ text?: string, entities?: object[], replyTo?: string, onProgress?: (label: string) => void }} [opts]
    */
   async sendDmMedia(dmId, files, opts = {}) {
-    if (!files?.length) throw new Error("No images");
-    if (files.length > MAX_ALBUM_ITEMS) {
-      throw new Error(`Album max ${MAX_ALBUM_ITEMS} images`);
-    }
+    const batch = classifyMediaBatch(files);
     const other = this._dmOther(dmId);
     if (!other) throw new Error("DM peer missing");
 
     /** @type {string[]} */
     const mediaIds = [];
+    /** @type {object[]} */
+    const mediaInfo = [];
     let i = 0;
-    for (const file of files) {
+    for (const file of batch.files) {
       i += 1;
-      opts.onProgress?.(`Compressing ${i}/${files.length}…`);
-      const compressed = await compressImage(file);
+      const prepared = await this._prepareFile(file, batch.mediaKind, (label) =>
+        opts.onProgress?.(
+          `${label} ${i}/${batch.files.length}…`.replace(/\s+/g, " "),
+        ),
+      );
       const mediaId = mintMediaId();
       const entry = {
-        mime: compressed.mime,
-        size: compressed.size,
-        width: compressed.width,
-        height: compressed.height,
-        blob: compressed.blob,
+        mime: prepared.mime,
+        size: prepared.size,
+        width: prepared.width,
+        height: prepared.height,
+        duration: prepared.duration,
+        blob: prepared.blob,
         senderPeerId: this.selfPeerId,
         dmId,
       };
       this.putLocalMedia(mediaId, entry);
-      opts.onProgress?.(`Sending ${i}/${files.length}…`);
+      opts.onProgress?.(`Sending ${i}/${batch.files.length}…`);
       await this._transferMediaTo(other, mediaId, entry, { dmId });
       mediaIds.push(mediaId);
+      mediaInfo.push({
+        size: prepared.size,
+        mime: prepared.mime,
+        duration: prepared.duration,
+        width: prepared.width,
+        height: prepared.height,
+      });
     }
 
     const r = applyDm(this.dmState, this.selfPeerId, {
       type: "dm-send-media",
       dmId,
       mediaIds,
+      mediaInfo,
       text: opts.text,
       entities: opts.entities,
       replyTo: opts.replyTo,
+      mediaKind: batch.mediaKind === "video" ? "video" : undefined,
     });
     if (!r.ok || !r.message) {
       this.hooks.onError(r.error || "Media send failed");
@@ -490,7 +525,9 @@ export class ChatSession {
         dmId,
         message: r.message,
         mediaIds,
+        mediaInfo,
         text: opts.text,
+        mediaKind: batch.mediaKind === "video" ? "video" : undefined,
       }),
       other,
     );
@@ -498,26 +535,90 @@ export class ChatSession {
   }
 
   /**
-   * Request any missing media ids (group path).
-   * @param {string[]} mediaIds
+   * @param {Blob} file
+   * @param {"image" | "video"} kind
+   * @param {(label: string) => void} [onLabel]
    */
-  ensureMedia(mediaIds) {
+  async _prepareFile(file, kind, onLabel) {
+    if (kind === "video") {
+      onLabel?.("Preparing video");
+      const v = await prepareVideo(file);
+      return {
+        blob: v.blob,
+        mime: v.mime,
+        width: v.width,
+        height: v.height,
+        duration: v.duration,
+        size: v.size,
+      };
+    }
+    onLabel?.("Compressing");
+    const img = await compressImage(file);
+    return {
+      blob: img.blob,
+      mime: img.mime,
+      width: img.width,
+      height: img.height,
+      size: img.size,
+    };
+  }
+
+  /**
+   * Request any missing media ids (group path).
+   * Videos larger than VIDEO_AUTO_DOWNLOAD_BYTES are skipped unless force.
+   * @param {string[]} mediaIds
+   * @param {{ force?: boolean, sizes?: Record<string, number> }} [opts]
+   */
+  ensureMedia(mediaIds, opts = {}) {
     if (!this.hostState) return;
     const hostId = getHostPeerId(this.hostState);
     for (const id of mediaIds || []) {
       if (!id || this.localMedia.has(id) || this.mediaStore.has(id)) continue;
       if (this._fetching.has(id)) continue;
+      const knownSize =
+        opts.sizes?.[id] ??
+        this._mediaMeta.get(id)?.size ??
+        0;
+      if (
+        !opts.force &&
+        knownSize > VIDEO_AUTO_DOWNLOAD_BYTES
+      ) {
+        log("media", "skip auto-download (large)", id, knownSize);
+        continue;
+      }
       this._fetching.add(id);
       if (this.role === "host") {
         const entry = this.mediaStore.get(id);
         if (entry) this.putLocalMedia(id, entry);
         this._fetching.delete(id);
+        this.hooks.onChange();
         continue;
       }
-      if (!hostId) continue;
+      if (!hostId) {
+        this._fetching.delete(id);
+        continue;
+      }
       log("media", "request", id);
       this._send(encodeFrame("media-request", { mediaId: id }), hostId);
     }
+  }
+
+  /**
+   * Remember size/mime from messages so large-video UI can show before fetch.
+   * @param {import("./engine.js").Message} message
+   */
+  rememberMediaInfo(message) {
+    if (!message?.mediaIds?.length) return;
+    const infos = message.mediaInfo || [];
+    message.mediaIds.forEach((id, i) => {
+      const info = infos[i];
+      if (!info) return;
+      this._mediaMeta.set(id, {
+        size: Number(info.size) || 0,
+        mime: info.mime,
+        duration: info.duration,
+      });
+    });
   }
 
   /**
@@ -877,8 +978,14 @@ export class ChatSession {
       this.hostState = applyHostEvent(this.hostState, body);
       if (body.event === "message-added" && body.message) {
         this._ackGroupMessage(body.chatId || body.message.chatId, body.message);
+        this.rememberMediaInfo(body.message);
         if (body.message.mediaIds?.length) {
-          this.ensureMedia(body.message.mediaIds);
+          const sizes = Object.create(null);
+          body.message.mediaIds.forEach((id, i) => {
+            const sz = body.message.mediaInfo?.[i]?.size;
+            if (sz != null) sizes[id] = sz;
+          });
+          this.ensureMedia(body.message.mediaIds, { sizes });
         }
       }
       this.hooks.onChange();
@@ -1007,12 +1114,15 @@ export class ChatSession {
           dmId,
           message: body.message,
           mediaIds: body.mediaIds || body.message?.mediaIds,
+          mediaInfo: body.mediaInfo || body.message?.mediaInfo,
           text: body.text || body.message?.text,
+          mediaKind: body.mediaKind,
         },
         { remoteSenderPeerId: peerId },
       );
       if (r.ok) {
         this.dmState = r.state;
+        if (r.message) this.rememberMediaInfo(r.message);
         if (body.message?.id || r.message?.id) {
           const id = body.message?.id || r.message.id;
           this._send(
@@ -1100,8 +1210,14 @@ export class ChatSession {
           effect.chatId || effect.message.chatId,
           effect.message,
         );
+        this.rememberMediaInfo(effect.message);
         if (effect.message.mediaIds?.length) {
-          this.ensureMedia(effect.message.mediaIds);
+          const sizes = Object.create(null);
+          effect.message.mediaIds.forEach((id, i) => {
+            const sz = effect.message.mediaInfo?.[i]?.size;
+            if (sz != null) sizes[id] = sz;
+          });
+          this.ensureMedia(effect.message.mediaIds, { sizes });
         }
       }
     }
@@ -1204,6 +1320,11 @@ export class ChatSession {
         from: peerId,
         dm: Boolean(body.dmId),
       });
+      this._mediaMeta.set(mediaId, {
+        size: Number(body.size) || 0,
+        mime: body.mime,
+        duration: body.duration != null ? Number(body.duration) : undefined,
+      });
       this._incoming.set(mediaId, {
         meta: body,
         chunks: [],
@@ -1238,14 +1359,16 @@ export class ChatSession {
       try {
         const blob = blobFromBase64Chunks(
           inc.chunks.filter(Boolean),
-          inc.meta.mime || "image/jpeg",
+          inc.meta.mime || "application/octet-stream",
         );
         /** @type {MediaEntry} */
         const entry = {
-          mime: inc.meta.mime || blob.type || "image/jpeg",
+          mime: inc.meta.mime || blob.type || "application/octet-stream",
           size: Number(inc.meta.size) || blob.size,
           width: inc.meta.width,
           height: inc.meta.height,
+          duration:
+            inc.meta.duration != null ? Number(inc.meta.duration) : undefined,
           blob,
           senderPeerId: peerId,
           chatId: inc.meta.chatId,
@@ -1315,12 +1438,14 @@ export class ChatSession {
 
     if (type === "media-reject") {
       const waiter = this._uploadWaiters.get(mediaId);
+      const reason = body.reason || "Media rejected";
       if (waiter) {
         this._uploadWaiters.delete(mediaId);
-        waiter.reject(new Error(body.reason || "Media rejected"));
+        waiter.reject(new Error(reason));
       }
       this._fetching.delete(mediaId);
-      warn("media", "rejected", mediaId, body.reason);
+      warn("media", "rejected", mediaId, reason);
+      this.hooks.onError(`${reason}. ${MEDIA_TURN_HINT}`);
     }
   }
 
@@ -1368,6 +1493,7 @@ export class ChatSession {
         size: entry.size,
         width: entry.width,
         height: entry.height,
+        duration: entry.duration,
         chatId: scope.chatId,
         dmId: scope.dmId,
       }),
@@ -1385,7 +1511,14 @@ export class ChatSession {
       );
     }
     this._send(encodeFrame("media-complete", { mediaId }), peerId);
-    await ack;
+    try {
+      await ack;
+    } catch (e) {
+      const msg = e?.message || String(e);
+      throw new Error(
+        /timeout|reject/i.test(msg) ? `${msg}. ${MEDIA_TURN_HINT}` : msg,
+      );
+    }
   }
 
   /**
@@ -1403,6 +1536,7 @@ export class ChatSession {
         size: entry.size,
         width: entry.width,
         height: entry.height,
+        duration: entry.duration,
         chatId: entry.chatId,
         dmId: entry.dmId,
       }),
@@ -1579,4 +1713,30 @@ export class ChatSession {
     }
     return `Connected (${n})`;
   }
+}
+
+/**
+ * @param {Blob[]} files
+ * @returns {{ files: Blob[], mediaKind: "image" | "video" }}
+ */
+function classifyMediaBatch(files) {
+  if (!files?.length) throw new Error("No media files");
+  const videos = files.filter((f) => f.type.startsWith("video/"));
+  const images = files.filter((f) => f.type.startsWith("image/"));
+  if (videos.length + images.length !== files.length) {
+    throw new Error("Unsupported file type");
+  }
+  if (videos.length && images.length) {
+    throw new Error("Cannot mix photos and video in one send");
+  }
+  if (videos.length > 1) {
+    throw new Error("Send one video at a time");
+  }
+  if (videos.length === 1) {
+    return { files: [videos[0]], mediaKind: "video" };
+  }
+  if (images.length > MAX_ALBUM_ITEMS) {
+    throw new Error(`Album max ${MAX_ALBUM_ITEMS} images`);
+  }
+  return { files: images, mediaKind: "image" };
 }
