@@ -12,8 +12,9 @@ import { dmIdFor, mintId } from "./ids.js";
  *   editedAt?: number,
  *   kind: "text" | "sticker" | "media" | "album" | "system",
  *   text?: string,
- *   entities?: unknown[],
+ *   entities?: { type: string, offset: number, length: number, url?: string }[],
  *   replyTo?: string,
+ *   delivery?: { ackedBy: string[] },
  * }} Message
  * @typedef {{
  *   app: string,
@@ -28,7 +29,7 @@ import { dmIdFor, mintId } from "./ids.js";
  *   dms: Record<string, Chat>,
  *   dmMessages: Record<string, Message[]>,
  * }} DmState
- * @typedef {{ event: string, chatId?: string, chat?: Chat, message?: Message, messageId?: string, memberPeerIds?: string[] }} Effect
+ * @typedef {{ event: string, chatId?: string, chat?: Chat, message?: Message, messageId?: string, memberPeerIds?: string[], delivery?: { ackedBy: string[] } }} Effect
  */
 
 /**
@@ -214,10 +215,79 @@ export function applyHost(state, action, ctx) {
         createdAt: Date.now(),
         kind: "text",
         text,
+        entities: Array.isArray(action.entities) ? action.entities : undefined,
         replyTo: action.replyTo,
+        delivery: { ackedBy: [] },
       };
       next.groupMessages[chatId] = [...(next.groupMessages[chatId] || []), msg];
       effects.push({ event: "message-added", chatId, message: msg });
+      return { ok: true, state: next, effects };
+    }
+
+    case "edit-message": {
+      const chatId = action.chatId;
+      const messageId = action.messageId;
+      const text = String(action.text ?? "");
+      if (!chatId || !next.groups[chatId]) {
+        return { ok: false, error: "Unknown group" };
+      }
+      const msgs = next.groupMessages[chatId] || [];
+      const idx = msgs.findIndex((m) => m.id === messageId);
+      if (idx < 0) return { ok: false, error: "Unknown message" };
+      const msg = msgs[idx];
+      if (msg.kind !== "text") {
+        return { ok: false, error: "Can only edit text messages" };
+      }
+      if (msg.senderPeerId !== actor) {
+        return { ok: false, error: "Can only edit own messages" };
+      }
+      if (!text.trim()) return { ok: false, error: "Empty message" };
+      const updated = {
+        ...msg,
+        text,
+        entities: Array.isArray(action.entities) ? action.entities : undefined,
+        editedAt: Date.now(),
+      };
+      next.groupMessages[chatId] = [
+        ...msgs.slice(0, idx),
+        updated,
+        ...msgs.slice(idx + 1),
+      ];
+      effects.push({ event: "message-edited", chatId, message: updated });
+      return { ok: true, state: next, effects };
+    }
+
+    case "ack-delivery": {
+      const chatId = action.chatId;
+      const messageIds = Array.isArray(action.messageIds)
+        ? action.messageIds.map(String)
+        : [];
+      if (!chatId || !next.groups[chatId]) {
+        return { ok: false, error: "Unknown group" };
+      }
+      if (!next.groups[chatId].memberPeerIds.includes(actor)) {
+        return { ok: false, error: "Not a group member" };
+      }
+      let changed = false;
+      const msgs = [...(next.groupMessages[chatId] || [])];
+      for (let i = 0; i < msgs.length; i++) {
+        const msg = msgs[i];
+        if (!messageIds.includes(msg.id)) continue;
+        if (msg.senderPeerId === actor) continue;
+        const ackedBy = [...(msg.delivery?.ackedBy || [])];
+        if (ackedBy.includes(actor)) continue;
+        ackedBy.push(actor);
+        msgs[i] = { ...msg, delivery: { ackedBy } };
+        changed = true;
+        effects.push({
+          event: "message-delivery",
+          chatId,
+          messageId: msg.id,
+          delivery: { ackedBy },
+        });
+      }
+      if (!changed) return { ok: true, state: next, effects: [] };
+      next.groupMessages[chatId] = msgs;
       return { ok: true, state: next, effects };
     }
 
@@ -338,9 +408,70 @@ export function applyHostEvent(state, body) {
       delete next.groupMessages[chatId];
       return next;
     }
+    case "message-edited": {
+      const msg = body.message;
+      const chatId = body.chatId || msg?.chatId;
+      if (!msg?.id || !chatId || !next.groupMessages[chatId]) return next;
+      next.groupMessages[chatId] = next.groupMessages[chatId].map((m) =>
+        m.id === msg.id ? msg : m,
+      );
+      return next;
+    }
+    case "message-delivery": {
+      const { chatId, messageId, delivery } = body;
+      if (!chatId || !messageId || !delivery || !next.groupMessages[chatId]) {
+        return next;
+      }
+      next.groupMessages[chatId] = next.groupMessages[chatId].map((m) =>
+        m.id === messageId ? { ...m, delivery } : m,
+      );
+      return next;
+    }
     default:
       return next;
   }
+}
+
+/**
+ * Append system lines into every group that includes peerId (or listed groups).
+ * @param {HostState} state
+ * @param {string} text
+ * @param {string[]} groupIds
+ * @returns {{ state: HostState, effects: Effect[] }}
+ */
+export function appendSystemToGroups(state, text, groupIds) {
+  const next = clone(state);
+  /** @type {Effect[]} */
+  const effects = [];
+  for (const chatId of groupIds) {
+    if (!next.groups[chatId]) continue;
+    const msg = {
+      id: mintId("sys"),
+      chatId,
+      senderPeerId: "",
+      createdAt: Date.now(),
+      kind: /** @type {const} */ ("system"),
+      text,
+    };
+    next.groupMessages[chatId] = [...(next.groupMessages[chatId] || []), msg];
+    effects.push({ event: "message-added", chatId, message: msg });
+  }
+  return { state: next, effects };
+}
+
+/**
+ * @param {HostState} hostState
+ * @param {DmState} dmState
+ * @param {string} chatId
+ * @param {string} messageId
+ * @returns {Message | null}
+ */
+export function findMessage(hostState, dmState, chatId, messageId) {
+  const g = hostState.groupMessages[chatId];
+  if (g) return g.find((m) => m.id === messageId) || null;
+  const d = dmState.dmMessages[chatId];
+  if (d) return d.find((m) => m.id === messageId) || null;
+  return null;
 }
 
 /**
@@ -416,6 +547,7 @@ export function applyDm(dmState, selfPeerId, action, opts = {}) {
             ...action.message,
             chatId: dmId,
             senderPeerId,
+            delivery: action.message.delivery || { ackedBy: [] },
           }
         : {
             id: mintId("m"),
@@ -424,7 +556,11 @@ export function applyDm(dmState, selfPeerId, action, opts = {}) {
             createdAt: Date.now(),
             kind: "text",
             text,
+            entities: Array.isArray(action.entities)
+              ? action.entities
+              : undefined,
             replyTo: action.replyTo,
+            delivery: { ackedBy: [] },
           };
 
       const list = next.dmMessages[dmId] || [];
@@ -433,6 +569,75 @@ export function applyDm(dmState, selfPeerId, action, opts = {}) {
       }
       next.dmMessages[dmId] = [...list, msg];
       return { ok: true, state: next, message: msg, dmId };
+    }
+
+    case "dm-edit": {
+      const dmId = action.dmId || action.chatId;
+      const messageId = action.messageId;
+      const text = String(action.text ?? "");
+      if (!dmId || !next.dms[dmId]) return { ok: false, error: "Unknown DM" };
+      const msgs = next.dmMessages[dmId] || [];
+      const idx = msgs.findIndex((m) => m.id === messageId);
+      if (idx < 0) return { ok: false, error: "Unknown message" };
+      const msg = msgs[idx];
+      const editor = remote || selfPeerId;
+      if (msg.senderPeerId !== editor) {
+        return { ok: false, error: "Can only edit own messages" };
+      }
+      if (msg.kind !== "text") {
+        return { ok: false, error: "Can only edit text messages" };
+      }
+      if (!text.trim()) return { ok: false, error: "Empty message" };
+      const updated = {
+        ...msg,
+        text,
+        entities: Array.isArray(action.entities) ? action.entities : undefined,
+        editedAt: action.editedAt || Date.now(),
+      };
+      next.dmMessages[dmId] = [
+        ...msgs.slice(0, idx),
+        updated,
+        ...msgs.slice(idx + 1),
+      ];
+      return { ok: true, state: next, message: updated, dmId };
+    }
+
+    case "dm-ack": {
+      const dmId = action.dmId || action.chatId;
+      const messageIds = Array.isArray(action.messageIds)
+        ? action.messageIds.map(String)
+        : [];
+      if (!dmId || !next.dms[dmId]) return { ok: false, error: "Unknown DM" };
+      const acker = remote || selfPeerId;
+      const msgs = [...(next.dmMessages[dmId] || [])];
+      let changed = false;
+      for (let i = 0; i < msgs.length; i++) {
+        const msg = msgs[i];
+        if (!messageIds.includes(msg.id)) continue;
+        if (msg.senderPeerId === acker) continue;
+        const ackedBy = [...(msg.delivery?.ackedBy || [])];
+        if (ackedBy.includes(acker)) continue;
+        ackedBy.push(acker);
+        msgs[i] = { ...msg, delivery: { ackedBy } };
+        changed = true;
+      }
+      if (changed) next.dmMessages[dmId] = msgs;
+      return { ok: true, state: next, dmId };
+    }
+
+    case "dm-delete": {
+      const dmId = action.dmId || action.chatId;
+      const messageId = action.messageId;
+      if (!dmId || !next.dms[dmId]) return { ok: false, error: "Unknown DM" };
+      const msgs = next.dmMessages[dmId] || [];
+      const msg = msgs.find((m) => m.id === messageId);
+      if (!msg) return { ok: false, error: "Unknown message" };
+      const actor = remote || selfPeerId;
+      if (msg.senderPeerId !== actor) {
+        return { ok: false, error: "Can only delete own DM messages" };
+      }
+      next.dmMessages[dmId] = msgs.filter((m) => m.id !== messageId);
+      return { ok: true, state: next, dmId };
     }
 
     default:
@@ -459,7 +664,7 @@ export function listChatsForUi(hostState, dmState, selfPeerId) {
       id: chat.id,
       kind: "group",
       title: chat.title || "Group",
-      preview: last?.text || "No messages yet",
+      preview: previewText(last),
       updatedAt: last?.createdAt || chat.createdAt,
       memberPeerIds: chat.memberPeerIds,
     });
@@ -475,7 +680,7 @@ export function listChatsForUi(hostState, dmState, selfPeerId) {
       id: chat.id,
       kind: "dm",
       title: other?.displayName || otherId || "DM",
-      preview: last?.text || "No messages yet",
+      preview: previewText(last),
       updatedAt: last?.createdAt || chat.createdAt,
       memberPeerIds: chat.memberPeerIds,
     });
@@ -548,6 +753,13 @@ export function fanoutPeerIdsForGroup(state, chatId) {
   const set = new Set(chat?.memberPeerIds || []);
   if (hostId) set.add(hostId);
   return [...set];
+}
+
+/** @param {Message | undefined} last */
+function previewText(last) {
+  if (!last) return "No messages yet";
+  if (last.kind === "system") return last.text || "System";
+  return last.text || "Message";
 }
 
 /** @param {HostState} state @param {string} peerId */

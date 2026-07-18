@@ -2,10 +2,12 @@ import {
   applyDm,
   applyHost,
   assertHostExcludesDms,
+  findMessage,
   getChatThread,
   isHostPeer,
   listChatsForUi,
 } from "../engine.js";
+import { parseMarkdownLite, toMarkdownLite } from "../entities.js";
 import { buildFixture } from "../fixture.js";
 import { isFixtureMode, readJoinSessionId } from "../invite.js";
 import { selfCheckEnvelope } from "../protocol.js";
@@ -41,6 +43,13 @@ const els = {
   modalBody: document.querySelector("#modal-body"),
   modalCancel: document.querySelector("#modal-cancel"),
   modalOk: document.querySelector("#modal-ok"),
+  replyBar: document.querySelector("#reply-bar"),
+  replyBarName: document.querySelector("#reply-bar-name"),
+  replyBarText: document.querySelector("#reply-bar-text"),
+  replyBarClear: document.querySelector("#reply-bar-clear"),
+  editBar: document.querySelector("#edit-bar"),
+  editBarClear: document.querySelector("#edit-bar-clear"),
+  jumpFab: document.querySelector("#jump-fab"),
 };
 
 /** @type {"fixture" | "online" | null} */
@@ -53,6 +62,14 @@ let fixtureStore = null;
 let activeChatId = null;
 /** @type {null | (() => void)} */
 let modalConfirm = null;
+/** @type {string | null} */
+let replyToId = null;
+/** @type {{ chatId: string, messageId: string } | null} */
+let editing = null;
+/** @type {Record<string, number>} */
+const unread = Object.create(null);
+/** @type {Map<string, Set<string>>} */
+const seenMessageIds = new Map();
 
 const joinId = readJoinSessionId();
 
@@ -81,12 +98,97 @@ function showBanner(text, ok) {
   }
 }
 
+function trackUnread(store) {
+  const chats = listChatsForUi(
+    store.hostState,
+    store.dmState,
+    store.selfPeerId,
+  );
+  for (const chat of chats) {
+    const thread = getChatThread(store.hostState, store.dmState, chat.id);
+    if (!thread) continue;
+    let seen = seenMessageIds.get(chat.id);
+    if (!seen) {
+      seen = new Set(thread.messages.map((m) => m.id));
+      seenMessageIds.set(chat.id, seen);
+      continue;
+    }
+    for (const msg of thread.messages) {
+      if (seen.has(msg.id)) continue;
+      seen.add(msg.id);
+      if (chat.id === activeChatId) continue;
+      if (msg.senderPeerId === store.selfPeerId) continue;
+      unread[chat.id] = (unread[chat.id] || 0) + 1;
+    }
+  }
+}
+
+function clearReply() {
+  replyToId = null;
+  if (els.replyBar) els.replyBar.hidden = true;
+}
+
+function clearEdit() {
+  editing = null;
+  if (els.editBar) els.editBar.hidden = true;
+  els.composeSend.setAttribute("aria-label", "Send");
+}
+
+function setReply(messageId) {
+  const store = getStore();
+  if (!store || !activeChatId) return;
+  clearEdit();
+  const msg = findMessage(
+    store.hostState,
+    store.dmState,
+    activeChatId,
+    messageId,
+  );
+  if (!msg) return;
+  replyToId = messageId;
+  const sender = store.hostState.roster.find((r) => r.peerId === msg.senderPeerId);
+  els.replyBarName.textContent =
+    msg.senderPeerId === store.selfPeerId
+      ? "You"
+      : sender?.displayName || msg.senderPeerId || "Message";
+  els.replyBarText.textContent = msg.text || "";
+  els.replyBar.hidden = false;
+  els.composeInput.focus();
+}
+
+function setEdit(messageId) {
+  const store = getStore();
+  if (!store || !activeChatId) return;
+  clearReply();
+  const msg = findMessage(
+    store.hostState,
+    store.dmState,
+    activeChatId,
+    messageId,
+  );
+  if (!msg || msg.senderPeerId !== store.selfPeerId) return;
+  editing = { chatId: activeChatId, messageId };
+  // Restore markers so save via parseMarkdownLite keeps formatting
+  els.composeInput.value = toMarkdownLite(msg.text || "", msg.entities);
+  els.editBar.hidden = false;
+  els.composeSend.setAttribute("aria-label", "Save");
+  els.composeInput.focus();
+}
+
+function updateJumpFab() {
+  const el = els.messages;
+  if (!el || !els.jumpFab) return;
+  const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+  els.jumpFab.hidden = dist < 100;
+}
+
 function paint() {
   const store = getStore();
   if (!store) return;
 
-  const ended =
-    mode === "online" ? session?.sessionEnded : false;
+  trackUnread(store);
+
+  const ended = mode === "online" ? session?.sessionEnded : false;
   const asHost =
     mode === "online"
       ? session?.role === "host"
@@ -99,11 +201,19 @@ function paint() {
   );
   if (activeChatId && !chats.some((c) => c.id === activeChatId)) {
     activeChatId = null;
+    clearReply();
+    clearEdit();
   }
-  if (!activeChatId && chats.length) activeChatId = chats[0].id;
+  if (!activeChatId && chats.length) {
+    activeChatId = chats[0].id;
+    unread[activeChatId] = 0;
+  }
 
-  renderChatList(els.chatList, chats, activeChatId, (id) => {
+  renderChatList(els.chatList, chats, activeChatId, unread, (id) => {
     activeChatId = id;
+    unread[id] = 0;
+    clearReply();
+    clearEdit();
     paint();
   });
 
@@ -131,14 +241,52 @@ function paint() {
         }
       },
       onDeleteMessage: (messageId) => {
-        if (mode === "online" && session && activeChatId) {
-          session.dispatchHostAction({
-            type: "delete-message",
-            chatId: activeChatId,
-            messageId,
-          });
+        if (!activeChatId) return;
+        if (mode === "online" && session) {
+          const t = getChatThread(
+            store.hostState,
+            store.dmState,
+            activeChatId,
+          );
+          if (t?.kind === "group") {
+            session.dispatchHostAction({
+              type: "delete-message",
+              chatId: activeChatId,
+              messageId,
+            });
+          } else {
+            session.deleteDmMessage(activeChatId, messageId);
+          }
+        } else if (mode === "fixture" && fixtureStore) {
+          const t = getChatThread(
+            fixtureStore.hostState,
+            fixtureStore.dmState,
+            activeChatId,
+          );
+          if (t?.kind === "group") {
+            const r = applyHost(
+              fixtureStore.hostState,
+              {
+                type: "delete-message",
+                chatId: activeChatId,
+                messageId,
+              },
+              { actorPeerId: fixtureStore.selfPeerId },
+            );
+            if (r.ok) fixtureStore = { ...fixtureStore, hostState: r.state };
+          } else {
+            const r = applyDm(fixtureStore.dmState, fixtureStore.selfPeerId, {
+              type: "dm-delete",
+              dmId: activeChatId,
+              messageId,
+            });
+            if (r.ok) fixtureStore = { ...fixtureStore, dmState: r.state };
+          }
+          paint();
         }
       },
+      onReply: (messageId) => setReply(messageId),
+      onEdit: (messageId) => setEdit(messageId),
     },
   );
 
@@ -151,6 +299,7 @@ function paint() {
   if (els.sessionLabel) {
     els.sessionLabel.textContent = store.hostState.session.title || "Session";
   }
+  updateJumpFab();
 }
 
 function enterAppShell({ badge, status, inviteUrl }) {
@@ -202,8 +351,6 @@ async function startOnlineHost(displayName, title) {
       status: "Connected (1)",
       inviteUrl: session.inviteUrl,
     });
-    const privacy = assertHostExcludesDms(session.hostState, session.dmState);
-    if (!privacy.ok) console.error(privacy.error);
     paint();
   } catch (e) {
     showBanner(e?.message || String(e), false);
@@ -296,12 +443,13 @@ function openNewGroupModal() {
       titleField.className = "field";
       titleField.innerHTML = `<span>Title</span><input id="group-title" maxlength="48" placeholder="Group name" />`;
       body.append(titleField);
-      const list = document.createElement("div");
-      list.className = "modal__list";
       const hint = document.createElement("p");
-      hint.style.cssText = "font-size:13px;color:var(--text-secondary);margin:0 0 8px";
+      hint.style.cssText =
+        "font-size:13px;color:var(--text-secondary);margin:0 0 8px";
       hint.textContent = "Select members (you are included automatically):";
       body.append(hint);
+      const list = document.createElement("div");
+      list.className = "modal__list";
       for (const p of others) {
         const label = document.createElement("label");
         const input = document.createElement("input");
@@ -331,9 +479,9 @@ function openNewGroupModal() {
   );
 }
 
-function sendText(text) {
-  const trimmed = text.trim();
-  if (!trimmed || !activeChatId) return;
+function sendOrSave() {
+  const raw = els.composeInput.value;
+  if (!raw.trim() || !activeChatId) return;
   const store = getStore();
   if (!store) return;
   const thread = getChatThread(
@@ -343,11 +491,71 @@ function sendText(text) {
   );
   if (!thread) return;
 
+  const parsed = parseMarkdownLite(raw);
+
+  if (editing) {
+    if (mode === "online" && session) {
+      if (thread.kind === "group") {
+        session.editGroupMessage(
+          editing.chatId,
+          editing.messageId,
+          parsed.text,
+          parsed.entities,
+        );
+      } else {
+        session.editDmMessage(
+          editing.chatId,
+          editing.messageId,
+          parsed.text,
+          parsed.entities,
+        );
+      }
+    } else if (mode === "fixture" && fixtureStore) {
+      if (thread.kind === "group") {
+        const r = applyHost(
+          fixtureStore.hostState,
+          {
+            type: "edit-message",
+            chatId: editing.chatId,
+            messageId: editing.messageId,
+            text: parsed.text,
+            entities: parsed.entities,
+          },
+          { actorPeerId: fixtureStore.selfPeerId },
+        );
+        if (r.ok) fixtureStore = { ...fixtureStore, hostState: r.state };
+      } else {
+        const r = applyDm(fixtureStore.dmState, fixtureStore.selfPeerId, {
+          type: "dm-edit",
+          dmId: editing.chatId,
+          messageId: editing.messageId,
+          text: parsed.text,
+          entities: parsed.entities,
+        });
+        if (r.ok) fixtureStore = { ...fixtureStore, dmState: r.state };
+      }
+      paint();
+    }
+    els.composeInput.value = "";
+    clearEdit();
+    return;
+  }
+
+  const opts = {
+    replyTo: replyToId || undefined,
+    entities: parsed.entities.length ? parsed.entities : undefined,
+  };
+
   if (mode === "fixture" && fixtureStore) {
     if (thread.kind === "group") {
       const r = applyHost(
         fixtureStore.hostState,
-        { type: "send-text", chatId: activeChatId, text: trimmed },
+        {
+          type: "send-text",
+          chatId: activeChatId,
+          text: parsed.text,
+          ...opts,
+        },
         { actorPeerId: fixtureStore.selfPeerId },
       );
       if (r.ok) fixtureStore = { ...fixtureStore, hostState: r.state };
@@ -355,28 +563,27 @@ function sendText(text) {
       const r = applyDm(fixtureStore.dmState, fixtureStore.selfPeerId, {
         type: "dm-send-text",
         dmId: activeChatId,
-        text: trimmed,
+        text: parsed.text,
+        ...opts,
       });
       if (r.ok) fixtureStore = { ...fixtureStore, dmState: r.state };
     }
     paint();
-    return;
+  } else if (session && !session.sessionEnded) {
+    if (thread.kind === "group") {
+      session.sendGroupText(activeChatId, parsed.text, opts);
+    } else {
+      session.sendDmText(activeChatId, parsed.text, opts);
+    }
   }
 
-  if (!session || session.sessionEnded) return;
-  if (thread.kind === "group") {
-    session.sendGroupText(activeChatId, trimmed);
-  } else {
-    session.sendDmText(activeChatId, trimmed);
-  }
+  els.composeInput.value = "";
+  clearReply();
 }
 
-// —— Wire UI ——
 els.composeForm.addEventListener("submit", (e) => {
   e.preventDefault();
-  const value = els.composeInput.value;
-  els.composeInput.value = "";
-  sendText(value);
+  sendOrSave();
   els.composeInput.focus();
 });
 
@@ -385,6 +592,17 @@ els.composeInput.addEventListener("keydown", (e) => {
     e.preventDefault();
     els.composeForm.requestSubmit();
   }
+});
+
+els.messages?.addEventListener("scroll", updateJumpFab);
+els.jumpFab?.addEventListener("click", () => {
+  els.messages.scrollTop = els.messages.scrollHeight;
+  updateJumpFab();
+});
+els.replyBarClear?.addEventListener("click", clearReply);
+els.editBarClear?.addEventListener("click", () => {
+  clearEdit();
+  els.composeInput.value = "";
 });
 
 els.inviteCopy?.addEventListener("click", async () => {
@@ -413,7 +631,6 @@ window.addEventListener("beforeunload", () => {
   session?.leave();
 });
 
-// —— Boot ——
 if (isFixtureMode()) {
   startFixture();
 } else {

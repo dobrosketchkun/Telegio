@@ -1,10 +1,13 @@
+import { isFullyDelivered, renderEntities } from "../entities.js";
+
 /**
  * @param {HTMLElement} root
  * @param {Array<{ id: string, kind: string, title: string, preview: string, updatedAt: number }>} chats
  * @param {string | null} activeId
+ * @param {Record<string, number>} unread
  * @param {(id: string) => void} onSelect
  */
-export function renderChatList(root, chats, activeId, onSelect) {
+export function renderChatList(root, chats, activeId, unread, onSelect) {
   root.innerHTML = "";
   for (const chat of chats) {
     const li = document.createElement("li");
@@ -31,11 +34,21 @@ export function renderChatList(root, chats, activeId, onSelect) {
     main.querySelector(".chat-list__time").textContent = formatTime(chat.updatedAt);
     main.querySelector(".chat-list__preview").textContent = chat.preview;
 
+    const right = document.createElement("div");
+    right.className = "chat-list__right";
     const kind = document.createElement("div");
     kind.className = "chat-list__kind";
     kind.textContent = chat.kind === "dm" ? "DM" : "Group";
+    right.append(kind);
+    const count = unread[chat.id] || 0;
+    if (count > 0) {
+      const badge = document.createElement("span");
+      badge.className = "unread-badge";
+      badge.textContent = count > 99 ? "99+" : String(count);
+      right.append(badge);
+    }
 
-    btn.append(av, main, kind);
+    btn.append(av, main, right);
     li.append(btn);
     root.append(li);
   }
@@ -53,6 +66,8 @@ export function renderChatList(root, chats, activeId, onSelect) {
  *   subtitle?: string,
  *   onDeleteGroup?: () => void,
  *   onDeleteMessage?: (messageId: string) => void,
+ *   onReply?: (messageId: string) => void,
+ *   onEdit?: (messageId: string) => void,
  * }} [opts]
  */
 export function renderThread(
@@ -124,8 +139,24 @@ export function renderThread(
     actions.append(del);
   }
 
+  const prevScroll = {
+    top: messagesEl.scrollTop,
+    height: messagesEl.scrollHeight,
+    nearBottom:
+      messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight <
+      80,
+  };
+
   messagesEl.innerHTML = "";
   for (const msg of messages) {
+    if (msg.kind === "system") {
+      const sys = document.createElement("div");
+      sys.className = "system-msg";
+      sys.textContent = msg.text || "";
+      messagesEl.append(sys);
+      continue;
+    }
+
     const outgoing = msg.senderPeerId === selfPeerId;
     const row = document.createElement("div");
     row.className =
@@ -143,39 +174,119 @@ export function renderThread(
       bubble.append(name);
     }
 
+    if (msg.replyTo) {
+      const parent = messages.find((m) => m.id === msg.replyTo);
+      const quote = document.createElement("div");
+      quote.className = "bubble__quote";
+      const qName = document.createElement("div");
+      qName.className = "bubble__quote-name";
+      if (parent) {
+        const pSender = hostState.roster.find(
+          (r) => r.peerId === parent.senderPeerId,
+        );
+        qName.textContent =
+          parent.senderPeerId === selfPeerId
+            ? "You"
+            : pSender?.displayName || parent.senderPeerId || "Message";
+      } else {
+        qName.textContent = "Reply";
+      }
+      const qText = document.createElement("div");
+      qText.className = "bubble__quote-text";
+      qText.textContent = parent?.text || "Original message";
+      quote.append(qName, qText);
+      bubble.append(quote);
+    }
+
+    const text = document.createElement("div");
+    text.className = "bubble__text";
+    text.append(renderEntities(msg.text || "", msg.entities));
+    bubble.append(text);
+
+    const meta = document.createElement("div");
+    meta.className = "bubble__meta";
+    if (msg.editedAt) {
+      const edited = document.createElement("span");
+      edited.className = "bubble__edited";
+      edited.textContent = "edited";
+      meta.append(edited);
+    }
+    const time = document.createElement("span");
+    time.textContent = formatTime(msg.createdAt);
+    meta.append(time);
+    if (outgoing && msg.kind === "text") {
+      const checks = document.createElement("span");
+      checks.className = "checks";
+      const delivered = isFullyDelivered(
+        chat.memberPeerIds,
+        msg.senderPeerId,
+        msg.delivery?.ackedBy || [],
+      );
+      checks.classList.add(delivered ? "checks--double" : "checks--single");
+      checks.innerHTML = delivered
+        ? '<svg viewBox="0 0 16 10" width="16" height="10"><path d="M1 5l3 3 6-7M5 5l3 3 7-8" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>'
+        : '<svg viewBox="0 0 12 10" width="12" height="10"><path d="M1 5l3 3 7-7" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>';
+      meta.append(checks);
+    }
+    bubble.append(meta);
+
+    const toolbar = document.createElement("div");
+    toolbar.className = "bubble__toolbar";
+    if (!opts.sessionEnded && typeof opts.onReply === "function") {
+      const replyBtn = document.createElement("button");
+      replyBtn.type = "button";
+      replyBtn.className = "btn btn--tiny";
+      replyBtn.textContent = "Reply";
+      replyBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        opts.onReply(msg.id);
+      });
+      toolbar.append(replyBtn);
+    }
+    if (
+      !opts.sessionEnded &&
+      outgoing &&
+      msg.kind === "text" &&
+      typeof opts.onEdit === "function"
+    ) {
+      const editBtn = document.createElement("button");
+      editBtn.type = "button";
+      editBtn.className = "btn btn--tiny";
+      editBtn.textContent = "Edit";
+      editBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        opts.onEdit(msg.id);
+      });
+      toolbar.append(editBtn);
+    }
     const canDelete =
-      kind === "group" &&
       !opts.sessionEnded &&
       typeof opts.onDeleteMessage === "function" &&
-      (opts.isHost || outgoing);
-
+      (kind === "dm"
+        ? outgoing
+        : opts.isHost || outgoing);
     if (canDelete) {
       const delBtn = document.createElement("button");
       delBtn.type = "button";
-      delBtn.className = "btn btn--danger bubble__delete";
+      delBtn.className = "btn btn--tiny btn--danger";
       delBtn.textContent = "Delete";
       delBtn.addEventListener("click", (e) => {
         e.stopPropagation();
         opts.onDeleteMessage(msg.id);
       });
-      bubble.append(delBtn);
+      toolbar.append(delBtn);
     }
-
-    const text = document.createElement("div");
-    text.className = "bubble__text";
-    text.textContent = msg.text || "";
-    bubble.append(text);
-
-    const meta = document.createElement("div");
-    meta.className = "bubble__meta";
-    meta.textContent = formatTime(msg.createdAt);
-    bubble.append(meta);
+    if (toolbar.childNodes.length) bubble.append(toolbar);
 
     row.append(bubble);
     messagesEl.append(row);
   }
 
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  if (prevScroll.nearBottom || prevScroll.height < 40) {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  } else {
+    messagesEl.scrollTop = prevScroll.top;
+  }
 }
 
 /** @param {string} name */

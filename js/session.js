@@ -1,6 +1,7 @@
 import { APP_ID, APP_VERSION } from "./constants.js";
 import {
   addRosterPeer,
+  appendSystemToGroups,
   applyDm,
   applyHost,
   applyHostEvent,
@@ -9,7 +10,6 @@ import {
   fanoutPeerIdsForGroup,
   filterHostStateForPeer,
   getHostPeerId,
-  hostSnapshot,
   removeRosterPeer,
 } from "./engine.js";
 import { makeSessionId, dmIdFor } from "./ids.js";
@@ -155,6 +155,7 @@ export class ChatSession {
       }
       this.hostState = result.state;
       this._emitEffects(result.effects, /* skipSelf */ true);
+      this._ackFromEffects(result.effects);
       if (this.hostState.session.ended) {
         this.ended = true;
         this._send(encodeFrame("session-ended", { reason: "ended" }));
@@ -202,21 +203,22 @@ export class ChatSession {
   /**
    * @param {string} dmId
    * @param {string} text
+   * @param {{ replyTo?: string, entities?: object[] }} [opts]
    */
-  sendDmText(dmId, text) {
+  sendDmText(dmId, text, opts = {}) {
     const r = applyDm(this.dmState, this.selfPeerId, {
       type: "dm-send-text",
       dmId,
       text,
+      replyTo: opts.replyTo,
+      entities: opts.entities,
     });
     if (!r.ok || !r.message) {
       this.hooks.onError(r.error || "DM send failed");
       return;
     }
     this.dmState = r.state;
-    const other = this.dmState.dms[dmId]?.memberPeerIds.find(
-      (p) => p !== this.selfPeerId,
-    );
+    const other = this._dmOther(dmId);
     if (!other) {
       this.hooks.onError("DM peer missing");
       return;
@@ -232,9 +234,95 @@ export class ChatSession {
     this.hooks.onChange();
   }
 
-  /** @param {string} chatId @param {string} text */
-  sendGroupText(chatId, text) {
-    this.dispatchHostAction({ type: "send-text", chatId, text });
+  /**
+   * @param {string} chatId
+   * @param {string} text
+   * @param {{ replyTo?: string, entities?: object[] }} [opts]
+   */
+  sendGroupText(chatId, text, opts = {}) {
+    this.dispatchHostAction({
+      type: "send-text",
+      chatId,
+      text,
+      replyTo: opts.replyTo,
+      entities: opts.entities,
+    });
+  }
+
+  /**
+   * @param {string} chatId
+   * @param {string} messageId
+   * @param {string} text
+   * @param {object[]} [entities]
+   */
+  editGroupMessage(chatId, messageId, text, entities) {
+    this.dispatchHostAction({
+      type: "edit-message",
+      chatId,
+      messageId,
+      text,
+      entities,
+    });
+  }
+
+  /**
+   * @param {string} dmId
+   * @param {string} messageId
+   * @param {string} text
+   * @param {object[]} [entities]
+   */
+  editDmMessage(dmId, messageId, text, entities) {
+    const editedAt = Date.now();
+    const r = applyDm(this.dmState, this.selfPeerId, {
+      type: "dm-edit",
+      dmId,
+      messageId,
+      text,
+      entities,
+      editedAt,
+    });
+    if (!r.ok || !r.message) {
+      this.hooks.onError(r.error || "Edit failed");
+      return;
+    }
+    this.dmState = r.state;
+    const other = this._dmOther(dmId);
+    if (other) {
+      this._send(
+        encodeFrame("dm-edit", {
+          dmId,
+          messageId,
+          text,
+          entities,
+          editedAt,
+          message: r.message,
+        }),
+        other,
+      );
+    }
+    this.hooks.onChange();
+  }
+
+  /**
+   * @param {string} dmId
+   * @param {string} messageId
+   */
+  deleteDmMessage(dmId, messageId) {
+    const r = applyDm(this.dmState, this.selfPeerId, {
+      type: "dm-delete",
+      dmId,
+      messageId,
+    });
+    if (!r.ok) {
+      this.hooks.onError(r.error);
+      return;
+    }
+    this.dmState = r.state;
+    const other = this._dmOther(dmId);
+    if (other) {
+      this._send(encodeFrame("dm-delete", { dmId, messageId }), other);
+    }
+    this.hooks.onChange();
   }
 
   /**
@@ -272,7 +360,21 @@ export class ChatSession {
       this.connectedPeers.delete(peerId);
       this._awaitingHello.delete(peerId);
       if (this.role === "host" && this.hostState) {
+        const leaving = this.hostState.roster.find((r) => r.peerId === peerId);
+        const name = leaving?.displayName || peerId;
+        const groupIds = Object.values(this.hostState.groups)
+          .filter((g) => g.memberPeerIds.includes(peerId))
+          .map((g) => g.id);
         this.hostState = removeRosterPeer(this.hostState, peerId);
+        if (groupIds.length) {
+          const sys = appendSystemToGroups(
+            this.hostState,
+            `${name} left`,
+            groupIds,
+          );
+          this.hostState = sys.state;
+          this._emitEffects(sys.effects, false);
+        }
         this._broadcastRoster();
         this.hooks.onChange();
       }
@@ -347,6 +449,17 @@ export class ChatSession {
         peerId,
         displayName,
       });
+      // Announce join in every existing group (session-wide visibility in group threads)
+      const allGroupIds = Object.keys(this.hostState.groups);
+      if (allGroupIds.length) {
+        const sys = appendSystemToGroups(
+          this.hostState,
+          `${displayName} joined the session`,
+          allGroupIds,
+        );
+        this.hostState = sys.state;
+        this._emitEffects(sys.effects, false);
+      }
       const filtered = filterHostStateForPeer(this.hostState, peerId);
       this._send(
         encodeFrame("welcome", {
@@ -374,6 +487,7 @@ export class ChatSession {
       }
       this.hostState = result.state;
       this._emitEffects(result.effects, false);
+      this._ackFromEffects(result.effects);
       if (this.hostState.session.ended) {
         this.ended = true;
         this._send(encodeFrame("session-ended", { reason: "ended" }));
@@ -382,8 +496,13 @@ export class ChatSession {
       return;
     }
 
-    // Host may also receive DMs if they are a participant
-    if (type === "dm-open" || type === "dm-send-text") {
+    if (
+      type === "dm-open" ||
+      type === "dm-send-text" ||
+      type === "dm-edit" ||
+      type === "dm-ack" ||
+      type === "dm-delete"
+    ) {
       this._onDmFrame(type, body, peerId);
     }
   }
@@ -418,6 +537,9 @@ export class ChatSession {
     if (type === "event") {
       if (!this.hostState) return;
       this.hostState = applyHostEvent(this.hostState, body);
+      if (body.event === "message-added" && body.message) {
+        this._ackGroupMessage(body.chatId || body.message.chatId, body.message);
+      }
       this.hooks.onChange();
       return;
     }
@@ -440,7 +562,13 @@ export class ChatSession {
       return;
     }
 
-    if (type === "dm-open" || type === "dm-send-text") {
+    if (
+      type === "dm-open" ||
+      type === "dm-send-text" ||
+      type === "dm-edit" ||
+      type === "dm-ack" ||
+      type === "dm-delete"
+    ) {
       this._onDmFrame(type, body, peerId);
     }
   }
@@ -486,9 +614,133 @@ export class ChatSession {
       );
       if (r.ok) {
         this.dmState = r.state;
+        if (body.message?.id || r.message?.id) {
+          const id = body.message?.id || r.message.id;
+          this._send(
+            encodeFrame("dm-ack", { dmId, messageIds: [id] }),
+            peerId,
+          );
+        }
+        this.hooks.onChange();
+      }
+      return;
+    }
+
+    if (type === "dm-edit") {
+      const r = applyDm(
+        this.dmState,
+        this.selfPeerId,
+        {
+          type: "dm-edit",
+          dmId,
+          messageId: body.messageId || body.message?.id,
+          text: body.text || body.message?.text,
+          entities: body.entities || body.message?.entities,
+          editedAt: body.editedAt || body.message?.editedAt,
+        },
+        { remoteSenderPeerId: peerId },
+      );
+      if (r.ok) {
+        this.dmState = r.state;
+        this.hooks.onChange();
+      }
+      return;
+    }
+
+    if (type === "dm-ack") {
+      const r = applyDm(
+        this.dmState,
+        this.selfPeerId,
+        {
+          type: "dm-ack",
+          dmId,
+          messageIds: body.messageIds,
+        },
+        { remoteSenderPeerId: peerId },
+      );
+      if (r.ok) {
+        this.dmState = r.state;
+        this.hooks.onChange();
+      }
+      return;
+    }
+
+    if (type === "dm-delete") {
+      const r = applyDm(
+        this.dmState,
+        this.selfPeerId,
+        {
+          type: "dm-delete",
+          dmId,
+          messageId: body.messageId,
+        },
+        { remoteSenderPeerId: peerId },
+      );
+      if (r.ok) {
+        this.dmState = r.state;
         this.hooks.onChange();
       }
     }
+  }
+
+  /** @param {string} dmId */
+  _dmOther(dmId) {
+    return this.dmState.dms[dmId]?.memberPeerIds.find(
+      (p) => p !== this.selfPeerId,
+    );
+  }
+
+  /**
+   * After host applies effects locally, ack messages where we are a non-sender member.
+   * @param {import("./engine.js").Effect[]} effects
+   */
+  _ackFromEffects(effects) {
+    for (const effect of effects) {
+      if (effect.event === "message-added" && effect.message) {
+        this._ackGroupMessage(
+          effect.chatId || effect.message.chatId,
+          effect.message,
+        );
+      }
+    }
+  }
+
+  /**
+   * @param {string} chatId
+   * @param {import("./engine.js").Message} message
+   */
+  _ackGroupMessage(chatId, message) {
+    if (!this.hostState || !chatId || !message?.id) return;
+    if (message.kind === "system") return;
+    if (message.senderPeerId === this.selfPeerId) return;
+    const chat = this.hostState.groups[chatId];
+    if (!chat?.memberPeerIds.includes(this.selfPeerId)) return;
+
+    if (this.role === "host") {
+      const result = applyHost(
+        this.hostState,
+        { type: "ack-delivery", chatId, messageIds: [message.id] },
+        { actorPeerId: this.selfPeerId },
+      );
+      if (result.ok && result.effects.length) {
+        this.hostState = result.state;
+        this._emitEffects(result.effects, false);
+      }
+      return;
+    }
+
+    const hostId = getHostPeerId(this.hostState);
+    if (!hostId) return;
+    this._send(
+      encodeFrame("action", {
+        action: {
+          type: "ack-delivery",
+          chatId,
+          messageIds: [message.id],
+        },
+      }),
+      hostId,
+    );
   }
 
   /**

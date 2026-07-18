@@ -137,6 +137,19 @@ textarea {
   border-radius: 8px;
 }
 
+.btn--tiny {
+  border-color: transparent;
+  background: transparent;
+  font-size: 11px;
+  padding: 2px 6px;
+  color: var(--text-secondary);
+}
+
+.btn--tiny:hover {
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--text-primary);
+}
+
 .btn--danger {
   color: var(--danger);
   border-color: transparent;
@@ -375,10 +388,30 @@ textarea {
   text-overflow: ellipsis;
 }
 
+.chat-list__right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
 .chat-list__kind {
   font-size: 11px;
   color: var(--text-secondary);
   text-align: right;
+}
+
+.unread-badge {
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: var(--unread);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  display: grid;
+  place-items: center;
 }
 
 /* —— Main —— */
@@ -438,6 +471,14 @@ textarea {
   color: var(--text-secondary);
 }
 
+.messages-wrap {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
 .messages {
   flex: 1;
   overflow-y: auto;
@@ -445,6 +486,157 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+.jump-fab {
+  position: absolute;
+  right: 18px;
+  bottom: 12px;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 0;
+  background: var(--bg-header);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+  font-size: 18px;
+  color: var(--text-secondary);
+}
+
+.jump-fab[hidden] {
+  display: none !important;
+}
+
+.compose-wrap {
+  background: var(--bg-compose);
+  border-top: 1px solid var(--border);
+}
+
+.compose-hint {
+  margin: 0;
+  padding: 0 14px 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.reply-bar,
+.edit-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.reply-bar[hidden],
+.edit-bar[hidden] {
+  display: none !important;
+}
+
+.reply-bar__name {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.reply-bar__text {
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 360px;
+}
+
+.bubble__quote {
+  border-left: 3px solid var(--accent);
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 4px;
+  padding: 4px 8px;
+  margin-bottom: 4px;
+  font-size: 13px;
+}
+
+.bubble__quote-name {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.bubble__quote-text {
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bubble__toolbar {
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  margin-top: 2px;
+}
+
+.bubble:hover .bubble__toolbar {
+  opacity: 1;
+}
+
+.bubble__edited {
+  font-style: italic;
+  margin-right: 4px;
+}
+
+.checks {
+  display: inline-flex;
+  margin-left: 2px;
+  color: var(--bubble-meta);
+}
+
+.bubble--out .checks {
+  color: var(--bubble-out-meta);
+}
+
+.checks--double {
+  color: #4fae4e !important;
+}
+
+.spoiler {
+  background: #242f3d;
+  color: transparent;
+  border-radius: 3px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  user-select: none;
+}
+
+.spoiler.is-revealed {
+  background: rgba(0, 0, 0, 0.08);
+  color: inherit;
+  user-select: text;
+}
+
+.msg-code {
+  font-family: ui-monospace, Consolas, monospace;
+  background: rgba(0, 0, 0, 0.06);
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 0.92em;
+}
+
+.msg-link {
+  color: var(--text-link);
+}
+
+.system-msg {
+  align-self: center;
+  max-width: 80%;
+  text-align: center;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.92);
+  background: rgba(0, 0, 0, 0.25);
+  padding: 4px 10px;
+  border-radius: 10px;
+  margin: 4px 0;
 }
 
 .message-row {
@@ -515,8 +707,8 @@ textarea {
   gap: 8px;
   min-height: var(--compose-min-height);
   padding: 8px 12px;
-  background: var(--bg-compose);
-  border-top: 1px solid var(--border);
+  background: transparent;
+  border-top: 0;
 }
 
 .compose__input {

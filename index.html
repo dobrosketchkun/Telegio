@@ -57,21 +57,38 @@
 
       <section class="main">
         <header class="chat-header" id="chat-header"></header>
-        <div class="messages" id="messages"></div>
-        <form class="compose" id="compose-form">
-          <textarea
-            class="compose__input"
-            id="compose-input"
-            rows="1"
-            placeholder="Write a message..."
-            autocomplete="off"
-          ></textarea>
-          <button class="compose__send" id="compose-send" type="submit" aria-label="Send">
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-              <path d="M3.4 20.4l17.45-7.48a1 1 0 000-1.84L3.4 3.6a.993.993 0 00-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87.99l.01 4.61c0 .71.73 1.2 1.39.91z" />
-            </svg>
-          </button>
-        </form>
+        <div class="messages-wrap">
+          <div class="messages" id="messages"></div>
+          <button type="button" class="jump-fab" id="jump-fab" hidden aria-label="Jump to bottom">↓</button>
+        </div>
+        <div class="compose-wrap">
+          <div class="reply-bar" id="reply-bar" hidden>
+            <div class="reply-bar__body">
+              <div class="reply-bar__name" id="reply-bar-name"></div>
+              <div class="reply-bar__text" id="reply-bar-text"></div>
+            </div>
+            <button type="button" class="btn btn--danger" id="reply-bar-clear" aria-label="Cancel reply">×</button>
+          </div>
+          <div class="edit-bar" id="edit-bar" hidden>
+            <span>Editing message</span>
+            <button type="button" class="btn btn--danger" id="edit-bar-clear">Cancel</button>
+          </div>
+          <form class="compose" id="compose-form">
+            <textarea
+              class="compose__input"
+              id="compose-input"
+              rows="1"
+              placeholder="Write a message..."
+              autocomplete="off"
+            ></textarea>
+            <button class="compose__send" id="compose-send" type="submit" aria-label="Send">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M3.4 20.4l17.45-7.48a1 1 0 000-1.84L3.4 3.6a.993.993 0 00-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87.99l.01 4.61c0 .71.73 1.2 1.39.91z" />
+              </svg>
+            </button>
+          </form>
+          <p class="compose-hint">*bold* _italic_ ~strike~ `code` ||spoiler||</p>
+        </div>
       </section>
     </div>
 
