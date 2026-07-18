@@ -1,5 +1,6 @@
 import { APP_ID, APP_VERSION, MAX_ALBUM_ITEMS } from "./constants.js";
 import { dmIdFor, mintId } from "./ids.js";
+import { sanitizeFileName } from "./media.js";
 
 /**
  * @typedef {{ peerId: string, displayName: string, role: "host" | "member", joinedAt: number, colorIndex?: number }} RosterEntry
@@ -10,14 +11,14 @@ import { dmIdFor, mintId } from "./ids.js";
  *   senderPeerId: string,
  *   createdAt: number,
  *   editedAt?: number,
- *   kind: "text" | "sticker" | "media" | "album" | "video" | "audio" | "system",
+ *   kind: "text" | "sticker" | "media" | "album" | "video" | "audio" | "file" | "system",
  *   text?: string,
  *   entities?: { type: string, offset: number, length: number, url?: string }[],
  *   replyTo?: string,
  *   delivery?: { ackedBy: string[] },
  *   sticker?: { pack: string, stickerId: string },
  *   mediaIds?: string[],
- *   mediaInfo?: { size: number, mime?: string, duration?: number, width?: number, height?: number }[],
+ *   mediaInfo?: { size: number, mime?: string, duration?: number, width?: number, height?: number, fileName?: string, thumbDataUrl?: string }[],
  * }} Message
  * @typedef {{
  *   app: string,
@@ -269,6 +270,8 @@ export function applyHost(state, action, ctx) {
         mediaKind === "video" || looksLikeVideoInfo(mediaInfo, mediaIds.length);
       const asAudio =
         mediaKind === "audio" || looksLikeAudioInfo(mediaInfo, mediaIds.length);
+      const asFile =
+        mediaKind === "file" || looksLikeFileInfo(mediaInfo, mediaIds.length);
       if (!chatId || !next.groups[chatId]) {
         return { ok: false, error: "Unknown group" };
       }
@@ -287,6 +290,10 @@ export function applyHost(state, action, ctx) {
         if (mediaIds.length !== 1) {
           return { ok: false, error: "Audio must be a single clip" };
         }
+      } else if (asFile) {
+        if (mediaIds.length !== 1) {
+          return { ok: false, error: "File must be a single document" };
+        }
       } else if (mediaIds.length > MAX_ALBUM_ITEMS) {
         return { ok: false, error: `Album max ${MAX_ALBUM_ITEMS} images` };
       }
@@ -295,9 +302,11 @@ export function applyHost(state, action, ctx) {
         ? /** @type {const} */ ("video")
         : asAudio
           ? /** @type {const} */ ("audio")
-          : mediaIds.length === 1
-            ? /** @type {const} */ ("media")
-            : /** @type {const} */ ("album");
+          : asFile
+            ? /** @type {const} */ ("file")
+            : mediaIds.length === 1
+              ? /** @type {const} */ ("media")
+              : /** @type {const} */ ("album");
       const msg = {
         id: mintId("m"),
         chatId,
@@ -755,6 +764,10 @@ export function applyDm(dmState, selfPeerId, action, opts = {}) {
         mediaKind === "audio" ||
         action.message?.kind === "audio" ||
         looksLikeAudioInfo(mediaInfo, mediaIds.length);
+      const asFile =
+        mediaKind === "file" ||
+        action.message?.kind === "file" ||
+        looksLikeFileInfo(mediaInfo, mediaIds.length);
       if (!dmId) return { ok: false, error: "Unknown DM" };
       if (!mediaIds.length) return { ok: false, error: "Missing media" };
       if (asVideo) {
@@ -764,6 +777,10 @@ export function applyDm(dmState, selfPeerId, action, opts = {}) {
       } else if (asAudio) {
         if (mediaIds.length !== 1) {
           return { ok: false, error: "Audio must be a single clip" };
+        }
+      } else if (asFile) {
+        if (mediaIds.length !== 1) {
+          return { ok: false, error: "File must be a single document" };
         }
       } else if (mediaIds.length > MAX_ALBUM_ITEMS) {
         return { ok: false, error: `Album max ${MAX_ALBUM_ITEMS} images` };
@@ -793,14 +810,16 @@ export function applyDm(dmState, selfPeerId, action, opts = {}) {
       const caption = String(
         action.text ?? action.caption ?? action.message?.text ?? "",
       );
-      const kind = /** @type {"media" | "album" | "video" | "audio"} */ (
+      const kind = /** @type {"media" | "album" | "video" | "audio" | "file"} */ (
         asVideo
           ? "video"
           : asAudio
             ? "audio"
-            : mediaIds.length === 1
-              ? "media"
-              : "album"
+            : asFile
+              ? "file"
+              : mediaIds.length === 1
+                ? "media"
+                : "album"
       );
       /** @type {Message} */
       const msg = action.message
@@ -1039,6 +1058,14 @@ function previewText(last) {
   ) {
     return last.text?.trim() ? last.text : "Audio";
   }
+  if (
+    last.kind === "file" ||
+    looksLikeFileInfo(last.mediaInfo, last.mediaIds?.length || 0)
+  ) {
+    return last.text?.trim()
+      ? last.text
+      : last.mediaInfo?.[0]?.fileName || "File";
+  }
   if (last.kind === "media") {
     return last.text?.trim() ? last.text : "Photo";
   }
@@ -1063,11 +1090,11 @@ function normalizeMediaIds(raw) {
 /**
  * @param {unknown} raw
  * @param {number} len
- * @returns {{ size: number, mime?: string, duration?: number, width?: number, height?: number, thumbDataUrl?: string }[] | undefined}
+ * @returns {{ size: number, mime?: string, duration?: number, width?: number, height?: number, thumbDataUrl?: string, fileName?: string }[] | undefined}
  */
 function normalizeMediaInfo(raw, len) {
   if (!Array.isArray(raw) || !len) return undefined;
-  /** @type {{ size: number, mime?: string, duration?: number, width?: number, height?: number, thumbDataUrl?: string }[]} */
+  /** @type {{ size: number, mime?: string, duration?: number, width?: number, height?: number, thumbDataUrl?: string, fileName?: string }[]} */
   const out = [];
   for (let i = 0; i < len; i++) {
     const item = raw[i];
@@ -1080,6 +1107,11 @@ function normalizeMediaInfo(raw, len) {
       thumbRaw.length < 120_000
         ? thumbRaw
         : undefined;
+    const nameRaw = /** @type {{ fileName?: string }} */ (item).fileName;
+    const fileName =
+      typeof nameRaw === "string" && nameRaw.trim()
+        ? sanitizeFileName(nameRaw)
+        : undefined;
     out.push({
       size,
       mime: /** @type {{ mime?: string }} */ (item).mime,
@@ -1087,6 +1119,7 @@ function normalizeMediaInfo(raw, len) {
       width: /** @type {{ width?: number }} */ (item).width,
       height: /** @type {{ height?: number }} */ (item).height,
       thumbDataUrl,
+      fileName,
     });
   }
   return out.length ? out : undefined;
@@ -1109,6 +1142,25 @@ function looksLikeVideoInfo(mediaInfo, count) {
 function looksLikeAudioInfo(mediaInfo, count) {
   if (count !== 1 || !mediaInfo?.[0]?.mime) return false;
   return String(mediaInfo[0].mime).toLowerCase().startsWith("audio/");
+}
+
+/**
+ * Infer file when mediaKind was dropped but mime/name says document.
+ * @param {{ mime?: string, fileName?: string }[] | undefined} mediaInfo
+ * @param {number} count
+ */
+function looksLikeFileInfo(mediaInfo, count) {
+  if (count !== 1 || !mediaInfo?.[0]) return false;
+  const mime = String(mediaInfo[0].mime || "").toLowerCase();
+  if (
+    mime.startsWith("image/") ||
+    mime.startsWith("video/") ||
+    mime.startsWith("audio/")
+  ) {
+    return false;
+  }
+  if (mediaInfo[0].fileName) return true;
+  return Boolean(mime);
 }
 
 /** @param {HostState} state @param {string} peerId */

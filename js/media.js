@@ -15,11 +15,18 @@ export function isDeferredPlayableSize(size) {
 /** @deprecated use isDeferredPlayableSize */
 export const isDeferredVideoSize = isDeferredPlayableSize;
 
-/** Video or audio mime — same auto-download / unlock gate. */
-export function isGatedPlayableMime(mime) {
+/**
+ * Non-image mimes use the ~10MB auto-fetch / unlock gate (video, audio, documents).
+ * Images always auto-fetch.
+ */
+export function isDeferredTransferMime(mime) {
   const m = String(mime || "").toLowerCase();
-  return m.startsWith("video/") || m.startsWith("audio/");
+  if (!m || m.startsWith("image/")) return false;
+  return true;
 }
+
+/** @deprecated use isDeferredTransferMime */
+export const isGatedPlayableMime = isDeferredTransferMime;
 
 /**
  * @typedef {{
@@ -46,7 +53,16 @@ export function isGatedPlayableMime(mime) {
  *   duration: number,
  *   size: number,
  * }} PreparedAudio
+ *
+ * @typedef {{
+ *   blob: Blob,
+ *   mime: string,
+ *   size: number,
+ *   fileName: string,
+ * }} PreparedFile
  */
+
+const MAX_FILE_NAME_LEN = 180;
 
 /** @returns {string} */
 export function mintMediaId() {
@@ -291,6 +307,116 @@ export async function prepareAudio(input) {
   } finally {
     URL.revokeObjectURL(url);
   }
+}
+
+/**
+ * Sanitize a file name for mediaInfo (basename, no path, capped length).
+ * @param {unknown} raw
+ * @returns {string}
+ */
+export function sanitizeFileName(raw) {
+  let name = String(raw || "").replace(/\\/g, "/");
+  const slash = name.lastIndexOf("/");
+  if (slash >= 0) name = name.slice(slash + 1);
+  name = name.replace(/[\u0000-\u001f\u007f]/g, "").trim();
+  if (!name) name = "file";
+  if (name.length > MAX_FILE_NAME_LEN) {
+    const dot = name.lastIndexOf(".");
+    const ext = dot > 0 && name.length - dot <= 12 ? name.slice(dot) : "";
+    const base = name.slice(0, MAX_FILE_NAME_LEN - ext.length);
+    name = base + ext;
+  }
+  return name;
+}
+
+/**
+ * Middle-ellipsis for long names, keeping the extension when possible.
+ * @param {string} name
+ * @param {number} [max]
+ * @returns {string}
+ */
+export function middleTruncate(name, max = 28) {
+  const s = String(name || "");
+  if (s.length <= max) return s;
+  if (max < 5) return s.slice(0, max);
+  const dot = s.lastIndexOf(".");
+  const ext = dot > 0 && s.length - dot <= 8 ? s.slice(dot) : "";
+  const keep = max - ext.length - 1;
+  if (keep < 4) return s.slice(0, max - 1) + "…";
+  const head = Math.ceil(keep * 0.55);
+  const tail = keep - head;
+  const body = s.slice(0, s.length - ext.length);
+  return body.slice(0, head) + "…" + body.slice(body.length - tail) + ext;
+}
+
+/**
+ * @param {string} [mime]
+ * @param {string} [fileName]
+ * @returns {"doc" | "sheet" | "archive" | "text" | "unknown"}
+ */
+export function fileIconKind(mime, fileName) {
+  const m = String(mime || "").toLowerCase();
+  const name = String(fileName || "").toLowerCase();
+  const ext = name.includes(".") ? name.slice(name.lastIndexOf(".") + 1) : "";
+  if (
+    m.includes("zip") ||
+    m.includes("rar") ||
+    m.includes("7z") ||
+    m.includes("gzip") ||
+    m.includes("tar") ||
+    m.includes("compress") ||
+    /^(zip|rar|7z|gz|tgz|tar|bz2)$/.test(ext)
+  ) {
+    return "archive";
+  }
+  if (
+    m.includes("sheet") ||
+    m.includes("excel") ||
+    m.includes("csv") ||
+    /^(xlsx?|csv|ods)$/.test(ext)
+  ) {
+    return "sheet";
+  }
+  if (
+    m.startsWith("text/") ||
+    m.includes("json") ||
+    m.includes("xml") ||
+    /^(txt|md|json|xml|log|csv)$/.test(ext)
+  ) {
+    return "text";
+  }
+  if (
+    m.includes("pdf") ||
+    m.includes("word") ||
+    m.includes("document") ||
+    m.includes("msword") ||
+    m.includes("rtf") ||
+    /^(pdf|docx?|odt|rtf|pages)$/.test(ext)
+  ) {
+    return "doc";
+  }
+  return "unknown";
+}
+
+/**
+ * Prepare a generic document for send (no re-encode).
+ * @param {Blob | File} input
+ * @returns {Promise<PreparedFile>}
+ */
+export async function prepareFile(input) {
+  if (!(input instanceof Blob)) {
+    throw new Error("Expected file blob");
+  }
+  const mime = input.type || "application/octet-stream";
+  const fileName = sanitizeFileName(
+    input instanceof File && input.name ? input.name : "file",
+  );
+  return {
+    blob: input,
+    mime,
+    size: input.size,
+    fileName,
+  };
 }
 
 /**
@@ -608,6 +734,21 @@ function makeTinyWavAudio() {
  * @param {string} [color]
  * @returns {Promise<CompressedImage>}
  */
+/**
+ * Tiny text document for fixture mode.
+ * @returns {PreparedFile}
+ */
+export function makeFixtureFile() {
+  const body = "EphChat fixture document\nPhase 6 sample file.\n";
+  const blob = new Blob([body], { type: "text/plain" });
+  return {
+    blob,
+    mime: "text/plain",
+    size: blob.size,
+    fileName: "fixture-note.txt",
+  };
+}
+
 export async function makeFixtureImage(label, color = "#3a7bd5") {
   const canvas = document.createElement("canvas");
   canvas.width = 320;

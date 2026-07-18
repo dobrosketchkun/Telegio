@@ -9,6 +9,7 @@ import { parseMarkdownLite } from "./entities.js";
 import { dmIdFor } from "./ids.js";
 import {
   makeFixtureAudio,
+  makeFixtureFile,
   makeFixtureImage,
   makeFixtureVideo,
   mintMediaId,
@@ -183,7 +184,7 @@ export async function buildFixture(pack = null) {
     {
       type: "send-text",
       chatId: notesId,
-      text: "Phase 5.5 fixture: stickers + photos + albums + video + audio",
+      text: "Phase 6 fixture: stickers + photos + albums + video + audio + files",
     },
     { actorPeerId: PEERS.mira.peerId },
   );
@@ -464,6 +465,57 @@ export async function buildFixture(pack = null) {
     );
     hostState = sys.state;
   }
+
+  const doc = makeFixtureFile();
+  const midFile = mintMediaId();
+  const midFileDm = mintMediaId();
+  media.set(midFile, {
+    blob: doc.blob,
+    mime: doc.mime,
+    size: doc.size,
+    fileName: doc.fileName,
+    senderPeerId: PEERS.self.peerId,
+  });
+  media.set(midFileDm, {
+    blob: doc.blob,
+    mime: doc.mime,
+    size: doc.size,
+    fileName: doc.fileName,
+    senderPeerId: PEERS.self.peerId,
+  });
+
+  const fileInfo = [
+    {
+      size: doc.size,
+      mime: doc.mime,
+      fileName: doc.fileName,
+    },
+  ];
+  r = applyHost(
+    hostState,
+    {
+      type: "send-media",
+      chatId: groupId,
+      mediaIds: [midFile],
+      mediaInfo: fileInfo,
+      mediaKind: "file",
+      text: "Sample doc",
+    },
+    { actorPeerId: PEERS.self.peerId },
+  );
+  if (!r.ok) throw new Error(r.error);
+  hostState = r.state;
+
+  dr = applyDm(dmState, PEERS.self.peerId, {
+    type: "dm-send-media",
+    dmId,
+    mediaIds: [midFileDm],
+    mediaInfo: fileInfo,
+    mediaKind: "file",
+    text: "DM doc",
+  });
+  if (!dr.ok) throw new Error(dr.error);
+  dmState = dr.state;
 
   return {
     selfPeerId: PEERS.self.peerId,

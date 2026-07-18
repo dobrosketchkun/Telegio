@@ -1060,6 +1060,119 @@ textarea {
   min-height: 100px;
 }
 
+.bubble__file {
+  max-width: 280px;
+  min-width: 200px;
+}
+
+.file-doc {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: 0;
+  background: rgba(0, 0, 0, 0.06);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.file-doc:hover {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.file-doc--loading {
+  cursor: default;
+  opacity: 0.75;
+}
+
+.file-doc__icon {
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: #2c3e50;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.file-doc__icon::before {
+  content: "FILE";
+}
+
+.file-doc__icon--doc {
+  background: #c0392b;
+}
+.file-doc__icon--doc::before {
+  content: "DOC";
+}
+
+.file-doc__icon--sheet {
+  background: #27ae60;
+}
+.file-doc__icon--sheet::before {
+  content: "XLS";
+}
+
+.file-doc__icon--archive {
+  background: #8e44ad;
+}
+.file-doc__icon--archive::before {
+  content: "ZIP";
+}
+
+.file-doc__icon--text {
+  background: #2980b9;
+}
+.file-doc__icon--text::before {
+  content: "TXT";
+}
+
+.file-doc__icon--unknown {
+  background: #4a5568;
+}
+
+.file-doc__meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.file-doc__name {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-doc__size {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+.file-download {
+  min-height: 100px;
+  gap: 8px;
+}
+
+.file-download__name {
+  font-size: 12px;
+  opacity: 0.85;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .video-download {
   display: flex;
   flex-direction: column;
@@ -1126,7 +1239,8 @@ textarea {
 }
 
 .attach-pending__thumb--video,
-.attach-pending__thumb--audio {
+.attach-pending__thumb--audio,
+.attach-pending__thumb--file {
   display: grid;
   place-items: center;
   background: #1a1a1a;

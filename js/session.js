@@ -32,6 +32,7 @@ import {
   mediaChunkCount,
   mintMediaId,
   prepareAudio,
+  prepareFile,
   prepareVideo,
 } from "./media.js";
 import { decodeFrame, encodeFrame } from "./protocol.js";
@@ -428,7 +429,7 @@ export class ChatSession {
    * Videos over VIDEO_AUTO_DOWNLOAD_BYTES also get a tiny poster thumb in mediaInfo.
    * @param {Blob[]} files
    * @param {{ chatId?: string, onProgress?: (label: string) => void }} [opts]
-   * @returns {Promise<{ mediaIds: string[], mediaKind?: "video" | "audio", mediaInfo?: object[] }>}
+   * @returns {Promise<{ mediaIds: string[], mediaKind?: "video" | "audio" | "file", mediaInfo?: object[] }>}
    */
   async prepareGroupMedia(files, opts = {}) {
     if (!this.hostState) throw new Error("No session");
@@ -485,12 +486,14 @@ export class ChatSession {
         width: prepared.width,
         height: prepared.height,
         thumbDataUrl,
+        fileName: prepared.fileName,
       });
     }
-    /** @type {"video" | "audio" | undefined} */
+    /** @type {"video" | "audio" | "file" | undefined} */
     let mediaKind;
     if (batch.mediaKind === "video") mediaKind = "video";
     else if (batch.mediaKind === "audio") mediaKind = "audio";
+    else if (batch.mediaKind === "file") mediaKind = "file";
     return {
       mediaIds,
       mediaInfo,
@@ -575,13 +578,15 @@ export class ChatSession {
         width: prepared.width,
         height: prepared.height,
         thumbDataUrl,
+        fileName: prepared.fileName,
       });
     }
 
-    /** @type {"video" | "audio" | undefined} */
+    /** @type {"video" | "audio" | "file" | undefined} */
     let mediaKind;
     if (batch.mediaKind === "video") mediaKind = "video";
     else if (batch.mediaKind === "audio") mediaKind = "audio";
+    else if (batch.mediaKind === "file") mediaKind = "file";
 
     const r = applyDm(this.dmState, this.selfPeerId, {
       type: "dm-send-media",
@@ -614,7 +619,7 @@ export class ChatSession {
 
   /**
    * @param {Blob} file
-   * @param {"image" | "video" | "audio"} kind
+   * @param {"image" | "video" | "audio" | "file"} kind
    * @param {(label: string) => void} [onLabel]
    */
   async _prepareFile(file, kind, onLabel) {
@@ -640,6 +645,18 @@ export class ChatSession {
         height: 0,
         duration: a.duration,
         size: a.size,
+      };
+    }
+    if (kind === "file") {
+      onLabel?.("Preparing file");
+      const f = await prepareFile(file);
+      return {
+        blob: f.blob,
+        mime: f.mime,
+        width: 0,
+        height: 0,
+        size: f.size,
+        fileName: f.fileName,
       };
     }
     onLabel?.("Compressing");
@@ -1914,20 +1931,26 @@ export class ChatSession {
 
 /**
  * @param {Blob[]} files
- * @returns {{ files: Blob[], mediaKind: "image" | "video" | "audio" }}
+ * @returns {{ files: Blob[], mediaKind: "image" | "video" | "audio" | "file" }}
  */
 function classifyMediaBatch(files) {
   if (!files?.length) throw new Error("No media files");
   const videos = files.filter((f) => f.type.startsWith("video/"));
   const images = files.filter((f) => f.type.startsWith("image/"));
   const audios = files.filter((f) => f.type.startsWith("audio/"));
-  if (videos.length + images.length + audios.length !== files.length) {
-    throw new Error("Unsupported file type");
-  }
+  const docs = files.filter(
+    (f) =>
+      !f.type.startsWith("video/") &&
+      !f.type.startsWith("image/") &&
+      !f.type.startsWith("audio/"),
+  );
   const kinds =
-    (videos.length ? 1 : 0) + (images.length ? 1 : 0) + (audios.length ? 1 : 0);
+    (videos.length ? 1 : 0) +
+    (images.length ? 1 : 0) +
+    (audios.length ? 1 : 0) +
+    (docs.length ? 1 : 0);
   if (kinds > 1) {
-    throw new Error("Cannot mix photos, video, and audio in one send");
+    throw new Error("Cannot mix photos, video, audio, and files in one send");
   }
   if (videos.length > 1) {
     throw new Error("Send one video at a time");
@@ -1935,11 +1958,17 @@ function classifyMediaBatch(files) {
   if (audios.length > 1) {
     throw new Error("Send one audio at a time");
   }
+  if (docs.length > 1) {
+    throw new Error("Send one file at a time");
+  }
   if (videos.length === 1) {
     return { files: [videos[0]], mediaKind: "video" };
   }
   if (audios.length === 1) {
     return { files: [audios[0]], mediaKind: "audio" };
+  }
+  if (docs.length === 1) {
+    return { files: [docs[0]], mediaKind: "file" };
   }
   if (images.length > MAX_ALBUM_ITEMS) {
     throw new Error(`Album max ${MAX_ALBUM_ITEMS} images`);

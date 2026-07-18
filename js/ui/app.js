@@ -18,8 +18,10 @@ import {
   formatBytes,
   isDeferredPlayableSize,
   isGatedPlayableMime,
+  middleTruncate,
   mintMediaId,
   prepareAudio,
+  prepareFile,
   prepareVideo,
 } from "../media.js";
 import { selfCheckEnvelope } from "../protocol.js";
@@ -102,7 +104,7 @@ log("boot", {
   href: location.href,
   joinId,
   fixture: isFixtureMode(),
-  build: "phase5.5-audio",
+  build: "phase6-files",
 });
 
 const picker = createPicker(els.picker, {
@@ -203,6 +205,15 @@ function setReply(messageId) {
     (msg.kind === "media" &&
       msg.mediaIds?.length === 1 &&
       mimeLc.startsWith("audio/"));
+  const asFile =
+    msg.kind === "file" ||
+    (msg.kind === "media" &&
+      msg.mediaIds?.length === 1 &&
+      (Boolean(msg.mediaInfo?.[0]?.fileName) ||
+        (mimeLc &&
+          !mimeLc.startsWith("image/") &&
+          !mimeLc.startsWith("video/") &&
+          !mimeLc.startsWith("audio/"))));
   els.replyBarText.textContent =
     msg.kind === "sticker"
       ? "Sticker"
@@ -210,11 +221,13 @@ function setReply(messageId) {
         ? msg.text?.trim() || "Video"
         : asAudio
           ? msg.text?.trim() || "Audio"
-          : msg.kind === "media"
-            ? msg.text?.trim() || "Photo"
-            : msg.kind === "album"
-              ? msg.text?.trim() || "Album"
-              : msg.text || "";
+          : asFile
+            ? msg.text?.trim() || msg.mediaInfo?.[0]?.fileName || "File"
+            : msg.kind === "media"
+              ? msg.text?.trim() || "Photo"
+              : msg.kind === "album"
+                ? msg.text?.trim() || "Album"
+                : msg.text || "";
   els.replyBar.hidden = false;
   els.composeInput.focus();
 }
@@ -421,13 +434,14 @@ function paint() {
         const mime =
           m.mediaInfo?.[0]?.mime || resolveMediaMime(m.mediaIds[0]);
         const mimeLc = String(mime || "").toLowerCase();
-        const asPlayable =
+        const asDeferred =
           m.kind === "video" ||
           m.kind === "audio" ||
+          m.kind === "file" ||
           (m.kind === "media" &&
             m.mediaIds.length === 1 &&
-            (mimeLc.startsWith("video/") || mimeLc.startsWith("audio/")));
-        return asPlayable && m.mediaIds.some((id) => !resolveMediaUrl(id));
+            isGatedPlayableMime(mimeLc));
+        return asDeferred && m.mediaIds.some((id) => !resolveMediaUrl(id));
       });
       if (!waiting) setUploadStatus("");
     }
@@ -855,11 +869,15 @@ function renderPendingStrip() {
     } else if (p.file.type.startsWith("audio/")) {
       wrap.classList.add("attach-pending__thumb--audio");
       wrap.textContent = "Audio";
-    } else {
+    } else if (p.file.type.startsWith("image/")) {
       const img = document.createElement("img");
       img.src = p.url;
       img.alt = "";
       wrap.append(img);
+    } else {
+      wrap.classList.add("attach-pending__thumb--file");
+      wrap.textContent = middleTruncate(p.file.name || "File", 14);
+      wrap.title = p.file.name || "File";
     }
     els.attachPending.append(wrap);
   }
@@ -875,59 +893,66 @@ function renderPendingStrip() {
  * @param {FileList | File[]} list
  */
 function addPendingFiles(list) {
-  const incoming = [...list].filter(
-    (f) =>
-      f.type.startsWith("image/") ||
-      f.type.startsWith("video/") ||
-      f.type.startsWith("audio/"),
-  );
-  if (!incoming.length) {
-    showBanner("Only images, video, or audio", false);
-    return;
-  }
-  const hasVideo = incoming.some((f) => f.type.startsWith("video/"));
-  const hasAudio = incoming.some((f) => f.type.startsWith("audio/"));
-  const hasImage = incoming.some((f) => f.type.startsWith("image/"));
-  const kinds = [hasImage, hasVideo, hasAudio].filter(Boolean).length;
+  const incoming = [...list];
+  if (!incoming.length) return;
+
+  const isImage = (f) => f.type.startsWith("image/");
+  const isVideo = (f) => f.type.startsWith("video/");
+  const isAudio = (f) => f.type.startsWith("audio/");
+  const isDoc = (f) => !isImage(f) && !isVideo(f) && !isAudio(f);
+
+  const hasVideo = incoming.some(isVideo);
+  const hasAudio = incoming.some(isAudio);
+  const hasImage = incoming.some(isImage);
+  const hasFile = incoming.some(isDoc);
+  const kinds = [hasImage, hasVideo, hasAudio, hasFile].filter(Boolean).length;
   if (kinds > 1) {
-    showBanner("Cannot mix photos, video, and audio", false);
+    showBanner("Cannot mix photos, video, audio, and files", false);
     return;
   }
-  const pendingHasVideo = pendingFiles.some((p) =>
-    p.file.type.startsWith("video/"),
-  );
-  const pendingHasAudio = pendingFiles.some((p) =>
-    p.file.type.startsWith("audio/"),
-  );
-  const pendingHasImage = pendingFiles.some((p) =>
-    p.file.type.startsWith("image/"),
-  );
+
+  const pendingHasVideo = pendingFiles.some((p) => isVideo(p.file));
+  const pendingHasAudio = pendingFiles.some((p) => isAudio(p.file));
+  const pendingHasFile = pendingFiles.some((p) => isDoc(p.file));
+  const pendingHasImage = pendingFiles.some((p) => isImage(p.file));
 
   if (hasVideo) {
-    if (incoming.filter((f) => f.type.startsWith("video/")).length > 1) {
+    if (incoming.filter(isVideo).length > 1) {
       showBanner("Send one video at a time", false);
       return;
     }
     clearPendingFiles();
-    const file = incoming.find((f) => f.type.startsWith("video/"));
+    const file = incoming.find(isVideo);
     if (file) pendingFiles.push({ file, url: URL.createObjectURL(file) });
     renderPendingStrip();
     return;
   }
 
   if (hasAudio) {
-    if (incoming.filter((f) => f.type.startsWith("audio/")).length > 1) {
+    if (incoming.filter(isAudio).length > 1) {
       showBanner("Send one audio at a time", false);
       return;
     }
     clearPendingFiles();
-    const file = incoming.find((f) => f.type.startsWith("audio/"));
+    const file = incoming.find(isAudio);
     if (file) pendingFiles.push({ file, url: URL.createObjectURL(file) });
     renderPendingStrip();
     return;
   }
 
-  if (pendingHasVideo || pendingHasAudio) clearPendingFiles();
+  if (hasFile) {
+    if (incoming.filter(isDoc).length > 1) {
+      showBanner("Send one file at a time", false);
+      return;
+    }
+    clearPendingFiles();
+    const file = incoming.find(isDoc);
+    if (file) pendingFiles.push({ file, url: URL.createObjectURL(file) });
+    renderPendingStrip();
+    return;
+  }
+
+  if (pendingHasVideo || pendingHasAudio || pendingHasFile) clearPendingFiles();
   if (pendingHasImage === false && pendingFiles.length) clearPendingFiles();
 
   const room = MAX_ALBUM_ITEMS - pendingFiles.length;
@@ -935,7 +960,7 @@ function addPendingFiles(list) {
     showBanner(`Max ${MAX_ALBUM_ITEMS} photos`, false);
     return;
   }
-  const images = incoming.filter((f) => f.type.startsWith("image/"));
+  const images = incoming.filter(isImage);
   for (const file of images.slice(0, room)) {
     pendingFiles.push({ file, url: URL.createObjectURL(file) });
   }
@@ -971,6 +996,11 @@ async function sendPendingMedia() {
       if (!fixtureStore.media) fixtureStore.media = new Map();
       const isVideo = files.length === 1 && files[0].type.startsWith("video/");
       const isAudio = files.length === 1 && files[0].type.startsWith("audio/");
+      const isFile =
+        files.length === 1 &&
+        !files[0].type.startsWith("image/") &&
+        !files[0].type.startsWith("video/") &&
+        !files[0].type.startsWith("audio/");
       /** @type {string[]} */
       const mediaIds = [];
       let i = 0;
@@ -1010,6 +1040,19 @@ async function sendPendingMedia() {
           });
           unlockedFixtureMedia.add(id);
           mediaIds.push(id);
+        } else if (isFile) {
+          setUploadStatus(`Preparing file… ${formatBytes(file.size)}`);
+          const prepared = await prepareFile(file);
+          const id = mintMediaId();
+          fixtureStore.media.set(id, {
+            blob: prepared.blob,
+            mime: prepared.mime,
+            size: prepared.size,
+            fileName: prepared.fileName,
+            senderPeerId: fixtureStore.selfPeerId,
+          });
+          unlockedFixtureMedia.add(id);
+          mediaIds.push(id);
         } else {
           setUploadStatus(`Compressing ${i}/${files.length}…`);
           const compressed = await compressImage(file);
@@ -1025,7 +1068,13 @@ async function sendPendingMedia() {
           mediaIds.push(id);
         }
       }
-      const mediaKind = isVideo ? "video" : isAudio ? "audio" : undefined;
+      const mediaKind = isVideo
+        ? "video"
+        : isAudio
+          ? "audio"
+          : isFile
+            ? "file"
+            : undefined;
       const mediaInfoOut = mediaIds.map((id) => {
         const e = fixtureStore.media.get(id);
         return {
@@ -1035,6 +1084,7 @@ async function sendPendingMedia() {
           width: e?.width,
           height: e?.height,
           thumbDataUrl: e?.thumbDataUrl,
+          fileName: e?.fileName,
         };
       });
       if (thread.kind === "group") {
@@ -1074,7 +1124,12 @@ async function sendPendingMedia() {
           ? `Preparing video… ${formatBytes(files[0].size)}`
           : files.length === 1 && files[0].type.startsWith("audio/")
             ? `Preparing audio… ${formatBytes(files[0].size)}`
-            : "Preparing media…";
+            : files.length === 1 &&
+                !files[0].type.startsWith("image/") &&
+                !files[0].type.startsWith("video/") &&
+                !files[0].type.startsWith("audio/")
+              ? `Preparing file… ${formatBytes(files[0].size)}`
+              : "Preparing media…";
       setUploadStatus(label);
       if (thread.kind === "group") {
         const prepared = await session.prepareGroupMedia(files, {

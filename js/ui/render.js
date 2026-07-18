@@ -1,6 +1,10 @@
 import { VIDEO_AUTO_DOWNLOAD_BYTES } from "../constants.js";
 import { isFullyDelivered, renderEntities } from "../entities.js";
-import { formatBytes } from "../media.js";
+import {
+  fileIconKind,
+  formatBytes,
+  middleTruncate,
+} from "../media.js";
 import { stickerFileUrl } from "../stickers.js";
 
 /**
@@ -331,6 +335,81 @@ export function renderThread(
         text.append(renderEntities(msg.text, msg.entities));
         bubble.append(text);
       }
+    } else if (isFileMessage(msg, opts) && msg.mediaIds?.length) {
+      const wrap = document.createElement("div");
+      wrap.className = "bubble__file";
+      const mid = msg.mediaIds[0];
+      const info = msg.mediaInfo?.[0];
+      const size = Number(info?.size) || 0;
+      const outgoing = msg.senderPeerId === selfPeerId;
+      const mime = info?.mime;
+      const fileName = info?.fileName || "File";
+      const url =
+        typeof opts.getPlayableMediaUrl === "function"
+          ? opts.getPlayableMediaUrl(mid, { size, mime, outgoing })
+          : typeof opts.getMediaUrl === "function"
+            ? opts.getMediaUrl(mid)
+            : null;
+      const needsDownload =
+        !outgoing && size > VIDEO_AUTO_DOWNLOAD_BYTES && !url;
+      const iconKind = fileIconKind(mime, fileName);
+      if (url) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "file-doc";
+        btn.innerHTML = `<span class="file-doc__icon file-doc__icon--${iconKind}"></span><span class="file-doc__meta"><span class="file-doc__name"></span><span class="file-doc__size"></span></span>`;
+        const nameEl = btn.querySelector(".file-doc__name");
+        const sizeEl = btn.querySelector(".file-doc__size");
+        if (nameEl) nameEl.textContent = middleTruncate(fileName, 32);
+        if (sizeEl) sizeEl.textContent = size ? formatBytes(size) : "";
+        btn.title = fileName;
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const a = document.createElement("a");
+          a.href = url;
+          a.download = fileName;
+          a.target = "_blank";
+          a.rel = "noopener";
+          a.click();
+        });
+        wrap.append(btn);
+      } else if (needsDownload || size > VIDEO_AUTO_DOWNLOAD_BYTES) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "video-download file-download";
+        btn.innerHTML = `<span class="file-doc__icon file-doc__icon--${iconKind}"></span><span class="video-download__label">Download file</span><span class="video-download__size"></span><span class="file-download__name"></span>`;
+        const sizeEl = btn.querySelector(".video-download__size");
+        const nameEl = btn.querySelector(".file-download__name");
+        if (sizeEl) sizeEl.textContent = size ? formatBytes(size) : "";
+        if (nameEl) nameEl.textContent = middleTruncate(fileName, 32);
+        btn.title = fileName;
+        btn.addEventListener("click", (e) => {
+          e.stopPropagation();
+          opts.onDownloadMedia?.(mid);
+        });
+        wrap.append(btn);
+      } else {
+        const ph = document.createElement("div");
+        ph.className = "file-doc file-doc--loading";
+        ph.innerHTML = `<span class="file-doc__icon file-doc__icon--${iconKind}"></span><span class="file-doc__meta"><span class="file-doc__name"></span><span class="file-doc__size"></span></span>`;
+        const nameEl = ph.querySelector(".file-doc__name");
+        const sizeEl = ph.querySelector(".file-doc__size");
+        if (nameEl) nameEl.textContent = middleTruncate(fileName, 32);
+        if (sizeEl) {
+          sizeEl.textContent = size
+            ? `File… ${formatBytes(size)}`
+            : "File…";
+        }
+        wrap.append(ph);
+      }
+      bubble.append(wrap);
+      bubble.classList.add("bubble--file");
+      if (msg.text) {
+        const text = document.createElement("div");
+        text.className = "bubble__text";
+        text.append(renderEntities(msg.text, msg.entities));
+        bubble.append(text);
+      }
     } else if (
       (msg.kind === "media" || msg.kind === "album") &&
       msg.mediaIds?.length
@@ -395,8 +474,10 @@ export function renderThread(
         msg.kind === "album" ||
         msg.kind === "video" ||
         msg.kind === "audio" ||
+        msg.kind === "file" ||
         isVideoMessage(msg, opts) ||
-        isAudioMessage(msg, opts))
+        isAudioMessage(msg, opts) ||
+        isFileMessage(msg, opts))
     ) {
       const checks = document.createElement("span");
       checks.className = "checks";
@@ -506,6 +587,29 @@ function isAudioMessage(msg, opts = {}) {
   return mime.startsWith("audio/");
 }
 
+/**
+ * Document bubble (kind file, or media with non-AV mime / fileName).
+ * @param {import("../engine.js").Message | undefined} msg
+ * @param {{ getMediaMime?: (mediaId: string) => string | null }} [opts]
+ */
+function isFileMessage(msg, opts = {}) {
+  if (!msg?.mediaIds?.length) return false;
+  if (msg.kind === "file") return true;
+  if (msg.kind !== "media" || msg.mediaIds.length !== 1) return false;
+  if (msg.mediaInfo?.[0]?.fileName) return true;
+  const mid = msg.mediaIds[0];
+  const fromInfo = msg.mediaInfo?.[0]?.mime;
+  const fromStore =
+    typeof opts.getMediaMime === "function" ? opts.getMediaMime(mid) : null;
+  const mime = String(fromInfo || fromStore || "").toLowerCase();
+  if (!mime) return false;
+  return (
+    !mime.startsWith("image/") &&
+    !mime.startsWith("video/") &&
+    !mime.startsWith("audio/")
+  );
+}
+
 /** @param {import("../engine.js").Message | undefined} msg */
 function quotePreview(msg) {
   if (!msg) return "Original message";
@@ -515,6 +619,9 @@ function quotePreview(msg) {
   }
   if (msg.kind === "audio" || isAudioMessage(msg)) {
     return msg.text?.trim() || "Audio";
+  }
+  if (msg.kind === "file" || isFileMessage(msg)) {
+    return msg.text?.trim() || msg.mediaInfo?.[0]?.fileName || "File";
   }
   if (msg.kind === "media") return msg.text?.trim() || "Photo";
   if (msg.kind === "album") return msg.text?.trim() || "Album";
