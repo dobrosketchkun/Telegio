@@ -226,21 +226,20 @@ export function renderThread(
     }
 
     const actions = headerEl.querySelector(".chat-header__actions");
+    /** @type {{ label: string, danger?: boolean, onClick: () => void }[]} */
+    const menuItems = [];
     if (canAdd) {
-      const add = document.createElement("button");
-      add.type = "button";
-      add.className = "btn btn--small";
-      add.textContent = "Add members";
-      add.addEventListener("click", () => opts.onAddMembers());
-      actions.append(add);
+      menuItems.push({ label: "Add members", onClick: () => opts.onAddMembers() });
     }
     if (canDeleteGroup) {
-      const del = document.createElement("button");
-      del.type = "button";
-      del.className = "btn btn--small";
-      del.textContent = "Delete group";
-      del.addEventListener("click", () => opts.onDeleteGroup());
-      actions.append(del);
+      menuItems.push({
+        label: "Delete group",
+        danger: true,
+        onClick: () => opts.onDeleteGroup(),
+      });
+    }
+    if (menuItems.length) {
+      actions.append(buildHeaderMenu(menuItems));
     }
   }
 
@@ -844,6 +843,70 @@ function preservePlayingMedia(oldRow, newRow) {
   if (newMedia && newMedia.src === oldMedia.src) {
     newMedia.replaceWith(oldMedia);
   }
+}
+
+/**
+ * Three-dot (kebab) chat-header menu holding group actions.
+ * @param {{ label: string, danger?: boolean, onClick: () => void }[]} items
+ * @returns {HTMLElement}
+ */
+function buildHeaderMenu(items) {
+  const wrap = document.createElement("div");
+  wrap.className = "chat-header__menu-wrap";
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "icon-btn chat-header__menu-btn";
+  btn.setAttribute("aria-label", "Chat options");
+  btn.title = "Chat options";
+  btn.innerHTML =
+    '<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>';
+
+  const menu = document.createElement("div");
+  menu.className = "chat-header__menu";
+  menu.hidden = true;
+
+  const onDocClick = (e) => {
+    if (!wrap.contains(e.target)) closeMenu();
+  };
+  const onKey = (e) => {
+    if (e.key === "Escape") closeMenu();
+  };
+  function closeMenu() {
+    menu.hidden = true;
+    btn.classList.remove("is-active");
+    document.removeEventListener("click", onDocClick);
+    document.removeEventListener("keydown", onKey);
+  }
+
+  for (const item of items) {
+    const mi = document.createElement("button");
+    mi.type = "button";
+    mi.className = "menu-item" + (item.danger ? " menu-item--danger" : "");
+    mi.textContent = item.label;
+    mi.addEventListener("click", (e) => {
+      e.stopPropagation();
+      closeMenu();
+      item.onClick();
+    });
+    menu.append(mi);
+  }
+
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const open = menu.hidden;
+    menu.hidden = !open;
+    btn.classList.toggle("is-active", open);
+    if (open) {
+      document.addEventListener("click", onDocClick);
+      document.addEventListener("keydown", onKey);
+    } else {
+      closeMenu();
+    }
+  });
+
+  wrap.append(btn, menu);
+  return wrap;
 }
 
 /**
