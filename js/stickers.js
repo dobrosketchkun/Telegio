@@ -3,7 +3,9 @@ export const FIXTURE_PACK = "TofPaintSafe";
 
 const PACKS_KEY = "ephchat.stickerPacks";
 const RECENTS_KEY = "ephchat.stickerRecents";
+const EMOJI_RECENTS_KEY = "ephchat.emojiRecents";
 const MAX_RECENTS = 40;
+const MAX_EMOJI_RECENTS = 32;
 
 /**
  * stickers.from.tg serves pack JSON without Access-Control-Allow-Origin,
@@ -247,6 +249,31 @@ export function pushRecent(ref) {
     ),
   ].slice(0, MAX_RECENTS);
   localStorage.setItem(RECENTS_KEY, JSON.stringify(next));
+}
+
+/** @returns {string[]} */
+export function listEmojiRecents() {
+  try {
+    const raw = localStorage.getItem(EMOJI_RECENTS_KEY);
+    const list = raw ? JSON.parse(raw) : [];
+    return Array.isArray(list) ? list.filter((e) => typeof e === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/** @param {string} emoji */
+export function pushEmojiRecent(emoji) {
+  if (!emoji) return;
+  const next = [emoji, ...listEmojiRecents().filter((e) => e !== emoji)].slice(
+    0,
+    MAX_EMOJI_RECENTS,
+  );
+  try {
+    localStorage.setItem(EMOJI_RECENTS_KEY, JSON.stringify(next));
+  } catch {
+    /* storage full / unavailable */
+  }
 }
 
 /**

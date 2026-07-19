@@ -1,21 +1,130 @@
 import {
   addPacks,
   getPack,
+  listEmojiRecents,
   listPacks,
   listRecents,
   parsePackList,
+  pushEmojiRecent,
   pushRecent,
   removePack,
+  stickerFileUrl,
   stickerThumbUrl,
 } from "../stickers.js";
+import { EMOJI_CATEGORIES } from "./emoji-data.js";
+import { emojiImg } from "./twemoji.js";
 
-export const EMOJI = [
-  "😀", "😃", "😄", "😁", "😅", "😂", "🤣", "😊", "😇", "🙂", "😉", "😍",
-  "🥰", "😘", "😗", "😋", "😜", "🤪", "😎", "🤩", "🥳", "😏", "😒", "🙄",
-  "😢", "😭", "😤", "😠", "🤬", "🤯", "😳", "🤗", "🤔", "🤭", "🤫", "😶",
-  "👍", "👎", "👏", "🙌", "🤝", "🙏", "💪", "🔥", "⭐", "❤️", "🧡", "💛",
-  "💚", "💙", "💜", "🖤", "💔", "💯", "✨", "🎉", "🎊", "✅", "❌", "💤",
-];
+/** Flat list of all emoji characters (order = category order). */
+export const EMOJI = EMOJI_CATEGORIES.flatMap((c) => c.emojis.map((e) => e[0]));
+
+// Set true by the hold-preview when a press ends, so the ensuing synthetic
+// `click` doesn't send the sticker. Cleared on the next click / pointerdown.
+let suppressStickerClick = false;
+
+/**
+ * Telegram-style press-and-hold sticker preview. Holding a sticker in the grid
+ * shows a large floating preview; dragging over another sticker swaps it;
+ * releasing ends the preview WITHOUT sending (and keeps the picker open).
+ * @param {HTMLElement} grid
+ */
+function enableStickerPreview(grid) {
+  const HOLD_MS = 180;
+  const MOVE_CANCEL = 10;
+  let holdTimer = /** @type {ReturnType<typeof setTimeout> | null} */ (null);
+  let holding = false;
+  let startX = 0;
+  let startY = 0;
+  /** @type {HTMLElement | null} */
+  let previewEl = null;
+  /** @type {HTMLElement | null} */
+  let currentBtn = null;
+
+  /** @param {MouseEvent} e */
+  function stickerAtPoint(e) {
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const btn = el && el.closest ? el.closest(".picker__sticker") : null;
+    return btn && grid.contains(btn) ? /** @type {HTMLElement} */ (btn) : null;
+  }
+
+  /** @param {HTMLElement} btn */
+  function showPreview(btn) {
+    const img = btn.querySelector("img");
+    if (!img) return;
+    currentBtn = btn;
+    if (!previewEl) {
+      previewEl = document.createElement("div");
+      previewEl.className = "sticker-preview";
+      const card = document.createElement("div");
+      card.className = "sticker-preview__card";
+      const pImg = document.createElement("img");
+      pImg.alt = "";
+      card.append(pImg);
+      previewEl.append(card);
+      document.body.append(previewEl);
+    }
+    const pImg = previewEl.querySelector("img");
+    if (pImg) pImg.src = btn.dataset.full || img.currentSrc || img.src;
+  }
+
+  function cleanup() {
+    if (holdTimer) {
+      clearTimeout(holdTimer);
+      holdTimer = null;
+    }
+    if (previewEl) {
+      previewEl.remove();
+      previewEl = null;
+    }
+    currentBtn = null;
+    document.removeEventListener("pointermove", onMove, true);
+    document.removeEventListener("pointerup", onUp, true);
+    document.removeEventListener("pointercancel", onUp, true);
+  }
+
+  /** @param {PointerEvent} e */
+  function onMove(e) {
+    if (holding) {
+      e.preventDefault();
+      const btn = stickerAtPoint(e);
+      if (btn && btn !== currentBtn) showPreview(btn);
+      return;
+    }
+    // Still within the tap window: a real drag/scroll cancels the pending hold.
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
+    if (dx * dx + dy * dy > MOVE_CANCEL * MOVE_CANCEL) {
+      if (holdTimer) {
+        clearTimeout(holdTimer);
+        holdTimer = null;
+      }
+    }
+  }
+
+  function onUp() {
+    if (holding) suppressStickerClick = true;
+    holding = false;
+    cleanup();
+  }
+
+  grid.addEventListener("pointerdown", (e) => {
+    if (e.button !== undefined && e.button !== 0) return;
+    const btn = /** @type {HTMLElement} */ (e.target)?.closest?.(
+      ".picker__sticker",
+    );
+    if (!btn || !grid.contains(btn)) return;
+    suppressStickerClick = false;
+    holding = false;
+    startX = e.clientX;
+    startY = e.clientY;
+    document.addEventListener("pointermove", onMove, true);
+    document.addEventListener("pointerup", onUp, true);
+    document.addEventListener("pointercancel", onUp, true);
+    holdTimer = setTimeout(() => {
+      holding = true;
+      showPreview(/** @type {HTMLElement} */ (btn));
+    }, HOLD_MS);
+  });
+}
 
 /**
  * @param {HTMLElement} root
@@ -26,13 +135,21 @@ export const EMOJI = [
  * }} hooks
  */
 export function createPicker(root, hooks) {
-  let tab = "stickers";
+  let tab = "emoji";
   /** @type {"recents" | string} */
   let activePack = "recents";
+  let query = "";
+  /** @type {HTMLElement | null} */
+  let bodyEl = null;
+  /** @type {HTMLElement | null} */
+  let navEl = null;
 
   function render() {
     root.innerHTML = "";
     root.className = "picker";
+
+    const header = document.createElement("div");
+    header.className = "picker__header";
 
     const tabs = document.createElement("div");
     tabs.className = "picker__tabs";
@@ -45,68 +162,206 @@ export function createPicker(root, hooks) {
       btn.className = "picker__tab" + (tab === id ? " is-active" : "");
       btn.textContent = label;
       btn.addEventListener("click", () => {
+        if (tab === id) return;
         tab = id;
+        query = "";
         render();
       });
       tabs.append(btn);
     }
-    root.append(tabs);
+    header.append(tabs);
 
-    const body = document.createElement("div");
-    body.className = "picker__body";
+    const searchWrap = document.createElement("div");
+    searchWrap.className = "picker__search-wrap";
+    const search = document.createElement("input");
+    search.type = "search";
+    search.className = "picker__search";
+    search.placeholder = "Search";
+    search.value = query;
+    search.addEventListener("input", () => {
+      query = search.value.trim().toLowerCase();
+      renderBody();
+    });
+    searchWrap.append(search);
+    header.append(searchWrap);
+    root.append(header);
+
+    bodyEl = document.createElement("div");
+    bodyEl.className = "picker__body";
+    root.append(bodyEl);
+
+    navEl = document.createElement("div");
+    root.append(navEl);
+
+    renderBody();
+  }
+
+  function renderBody() {
+    if (!bodyEl || !navEl) return;
+    bodyEl.innerHTML = "";
+    navEl.innerHTML = "";
     if (tab === "emoji") {
-      body.append(renderEmoji());
+      renderEmojiBody();
+      renderEmojiNav();
     } else {
-      body.append(renderStickers());
-    }
-    root.append(body);
-
-    if (tab === "stickers") {
-      root.append(renderStrip());
+      renderStickerBody();
+      renderStrip();
     }
   }
 
-  function renderEmoji() {
+  function renderEmojiBody() {
+    if (query) {
+      /** @type {string[]} */
+      const matches = [];
+      for (const cat of EMOJI_CATEGORIES) {
+        for (const [ch, kw] of cat.emojis) {
+          if (ch === query || kw.includes(query)) matches.push(ch);
+        }
+      }
+      if (!matches.length) {
+        bodyEl.append(emptyText("No emoji found"));
+        return;
+      }
+      bodyEl.append(emojiGrid(matches));
+      return;
+    }
+
+    const recents = listEmojiRecents();
+    if (recents.length) {
+      bodyEl.append(sectionHeader("Recently used"));
+      bodyEl.append(emojiGrid(recents));
+    }
+    for (const cat of EMOJI_CATEGORIES) {
+      const head = sectionHeader(cat.name);
+      head.dataset.cat = cat.id;
+      bodyEl.append(head);
+      bodyEl.append(emojiGrid(cat.emojis.map((e) => e[0])));
+    }
+  }
+
+  /** @param {string[]} chars */
+  function emojiGrid(chars) {
     const grid = document.createElement("div");
     grid.className = "picker__emoji-grid";
-    for (const emo of EMOJI) {
+    for (const ch of chars) {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "picker__emoji";
-      btn.textContent = emo;
-      btn.addEventListener("click", () => hooks.onEmoji(emo));
+      btn.title = ch;
+      btn.append(emojiImg(ch));
+      btn.addEventListener("click", () => {
+        pushEmojiRecent(ch);
+        hooks.onEmoji(ch);
+      });
       grid.append(btn);
     }
     return grid;
   }
 
-  function renderStickers() {
-    const wrap = document.createElement("div");
-    wrap.className = "picker__stickers";
+  function renderEmojiNav() {
+    navEl.className = "picker__catnav";
+    if (listEmojiRecents().length) {
+      const recentsBtn = document.createElement("button");
+      recentsBtn.type = "button";
+      recentsBtn.className = "picker__catnav-btn";
+      recentsBtn.title = "Recently used";
+      recentsBtn.textContent = "🕘";
+      recentsBtn.addEventListener("click", () => {
+        query = "";
+        renderBody();
+        if (bodyEl) bodyEl.scrollTop = 0;
+      });
+      navEl.append(recentsBtn);
+    }
+    for (const cat of EMOJI_CATEGORIES) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "picker__catnav-btn";
+      btn.title = cat.name;
+      btn.append(emojiImg(cat.icon));
+      btn.addEventListener("click", () => {
+        if (query) {
+          query = "";
+          renderBody();
+        }
+        scrollToCategory(cat.id);
+        markActiveNav(cat.id);
+      });
+      btn.dataset.cat = cat.id;
+      navEl.append(btn);
+    }
+  }
+
+  /** @param {string} catId */
+  function scrollToCategory(catId) {
+    if (!bodyEl) return;
+    const head = bodyEl.querySelector(`.picker__section[data-cat="${catId}"]`);
+    if (!head) return;
+    const top =
+      head.getBoundingClientRect().top -
+      bodyEl.getBoundingClientRect().top +
+      bodyEl.scrollTop;
+    bodyEl.scrollTop = top;
+  }
+
+  /** @param {string} catId */
+  function markActiveNav(catId) {
+    if (!navEl) return;
+    for (const b of navEl.querySelectorAll(".picker__catnav-btn")) {
+      b.classList.toggle("is-active", b.dataset.cat === catId);
+    }
+  }
+
+  function renderStickerBody() {
+    if (query) {
+      /** @type {Array<{ pack: string, id: string, emoji?: string, thumbnail_url: string }>} */
+      const items = [];
+      for (const pack of listPacks()) {
+        const packMatch =
+          pack.title.toLowerCase().includes(query) ||
+          pack.name.toLowerCase().includes(query);
+        for (const s of pack.stickers) {
+          if (packMatch || (s.emoji && s.emoji.includes(query))) {
+            items.push({
+              pack: pack.name,
+              id: s.id,
+              emoji: s.emoji,
+              thumbnail_url: s.thumbnail_url,
+            });
+          }
+        }
+      }
+      bodyEl.append(sectionHeader("Results"));
+      if (!items.length) bodyEl.append(emptyText("No stickers found"));
+      else bodyEl.append(stickerGrid(items));
+      return;
+    }
 
     if (activePack === "recents") {
       const recents = listRecents();
-      wrap.append(sectionHeader("Recently used"));
+      bodyEl.append(sectionHeader("Recently used"));
       if (!recents.length) {
-        const empty = document.createElement("p");
-        empty.className = "picker__empty";
-        empty.textContent = "No recent stickers yet";
-        wrap.append(empty);
+        bodyEl.append(emptyText("No recent stickers yet"));
       } else {
-        wrap.append(stickerGrid(recents.map((r) => ({
-          pack: r.pack,
-          id: r.stickerId,
-          emoji: r.emoji,
-          thumbnail_url: stickerThumbUrl(r.pack, r.stickerId),
-        }))));
+        bodyEl.append(
+          stickerGrid(
+            recents.map((r) => ({
+              pack: r.pack,
+              id: r.stickerId,
+              emoji: r.emoji,
+              thumbnail_url: stickerThumbUrl(r.pack, r.stickerId),
+            })),
+          ),
+        );
       }
-      return wrap;
+      return;
     }
 
     const pack = getPack(activePack);
     if (!pack) {
       activePack = "recents";
-      return renderStickers();
+      renderStickerBody();
+      return;
     }
 
     const head = document.createElement("div");
@@ -121,17 +376,20 @@ export function createPicker(root, hooks) {
     rm.addEventListener("click", () => {
       removePack(pack.name);
       activePack = "recents";
-      render();
+      renderBody();
     });
     head.append(title, rm);
-    wrap.append(head);
-    wrap.append(stickerGrid(pack.stickers.map((s) => ({
-      pack: pack.name,
-      id: s.id,
-      emoji: s.emoji,
-      thumbnail_url: s.thumbnail_url,
-    }))));
-    return wrap;
+    bodyEl.append(head);
+    bodyEl.append(
+      stickerGrid(
+        pack.stickers.map((s) => ({
+          pack: pack.name,
+          id: s.id,
+          emoji: s.emoji,
+          thumbnail_url: s.thumbnail_url,
+        })),
+      ),
+    );
   }
 
   /**
@@ -145,40 +403,46 @@ export function createPicker(root, hooks) {
       btn.type = "button";
       btn.className = "picker__sticker";
       btn.title = s.emoji || s.id;
+      btn.dataset.full = stickerFileUrl(s.pack, s.id);
       const img = document.createElement("img");
       img.src = s.thumbnail_url || stickerThumbUrl(s.pack, s.id);
       img.alt = s.emoji || "sticker";
       img.loading = "lazy";
+      img.draggable = false;
       img.addEventListener("error", () => {
         img.replaceWith(document.createTextNode(s.emoji || "?"));
       });
       btn.append(img);
       btn.addEventListener("click", () => {
+        if (suppressStickerClick) {
+          suppressStickerClick = false;
+          return;
+        }
         const ref = { pack: s.pack, stickerId: s.id, emoji: s.emoji };
         pushRecent(ref);
         hooks.onSticker(ref);
-        render();
       });
       grid.append(btn);
     }
+    enableStickerPreview(grid);
     return grid;
   }
 
   function renderStrip() {
-    const strip = document.createElement("div");
-    strip.className = "picker__strip";
+    navEl.className = "picker__strip";
 
     const recentsBtn = document.createElement("button");
     recentsBtn.type = "button";
     recentsBtn.className =
       "picker__strip-btn" + (activePack === "recents" ? " is-active" : "");
-    recentsBtn.textContent = "⏱";
+    recentsBtn.textContent = "🕘";
     recentsBtn.title = "Recently used";
     recentsBtn.addEventListener("click", () => {
       activePack = "recents";
-      render();
+      query = "";
+      renderBody();
     });
-    strip.append(recentsBtn);
+    navEl.append(recentsBtn);
 
     for (const pack of listPacks()) {
       const btn = document.createElement("button");
@@ -200,9 +464,10 @@ export function createPicker(root, hooks) {
       }
       btn.addEventListener("click", () => {
         activePack = pack.name;
-        render();
+        query = "";
+        renderBody();
       });
-      strip.append(btn);
+      navEl.append(btn);
     }
 
     const addBtn = document.createElement("button");
@@ -211,9 +476,7 @@ export function createPicker(root, hooks) {
     addBtn.textContent = "+";
     addBtn.title = "Add sticker packs";
     addBtn.addEventListener("click", () => hooks.onRequestAddPacks());
-    strip.append(addBtn);
-
-    return strip;
+    navEl.append(addBtn);
   }
 
   /** @param {string} text */
@@ -224,14 +487,24 @@ export function createPicker(root, hooks) {
     return h;
   }
 
+  /** @param {string} text */
+  function emptyText(text) {
+    const p = document.createElement("p");
+    p.className = "picker__empty";
+    p.textContent = text;
+    return p;
+  }
+
   return {
     render,
     refresh: render,
     /**
-     * After packs added, jump to first new pack if any.
+     * After packs added, jump to the first new pack (switches to Stickers tab).
      * @param {string[]} [okNames]
      */
     focusPack(okNames) {
+      tab = "stickers";
+      query = "";
       if (okNames?.length) activePack = okNames[0];
       else if (listPacks().length) activePack = listPacks()[0].name;
       render();

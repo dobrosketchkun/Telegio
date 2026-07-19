@@ -780,6 +780,7 @@ body.is-resizing {
 }
 
 .compose-wrap {
+  position: relative;
   background: var(--bg-compose);
   border-top: 1px solid var(--border);
   padding-bottom: env(safe-area-inset-bottom, 0);
@@ -1019,29 +1020,50 @@ body.is-resizing {
   flex-shrink: 0;
 }
 
+.twemoji {
+  width: 1.2em;
+  height: 1.2em;
+  vertical-align: -0.2em;
+  margin: 0 0.03em;
+  object-fit: contain;
+}
+
 .picker {
-  border-top: 1px solid var(--border);
+  position: absolute;
+  bottom: calc(100% - 4px);
+  right: 8px;
+  z-index: 40;
+  width: 360px;
+  max-width: calc(100vw - 24px);
   background: #fff;
-  max-height: 320px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.22);
+  max-height: 384px;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .picker[hidden] {
   display: none !important;
 }
 
+.picker__header {
+  border-bottom: 1px solid var(--border);
+}
+
 .picker__tabs {
   display: flex;
-  gap: 4px;
-  padding: 8px 12px 0;
-  border-bottom: 1px solid var(--border);
+  gap: 2px;
+  padding: 4px 8px 0;
 }
 
 .picker__tab {
   border: 0;
   background: transparent;
-  padding: 8px 12px;
+  padding: 6px 10px;
+  font-size: 13px;
   cursor: pointer;
   color: var(--text-secondary);
   font-weight: 600;
@@ -1053,43 +1075,122 @@ body.is-resizing {
   border-bottom-color: var(--accent);
 }
 
+.picker__search-wrap {
+  padding: 6px 8px;
+}
+
+.picker__search {
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 13px;
+  background: var(--bg-hover);
+  color: var(--text-primary);
+  outline: none;
+}
+
+.picker__search:focus {
+  border-color: var(--accent);
+  background: #fff;
+}
+
 .picker__body {
   flex: 1;
   overflow-y: auto;
-  padding: 8px 10px;
-  min-height: 180px;
+  padding: 2px 6px 4px;
+  min-height: 200px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
 }
 
 .picker__section {
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 600;
   color: var(--text-secondary);
-  margin: 4px 0 8px;
+  margin: 8px 4px 2px;
 }
 
 .picker__empty {
   font-size: 13px;
   color: var(--text-secondary);
-  margin: 12px 0;
+  margin: 12px 4px;
 }
 
 .picker__emoji-grid {
   display: grid;
   grid-template-columns: repeat(8, 1fr);
-  gap: 2px;
+  gap: 0;
 }
 
 .picker__emoji {
   border: 0;
   background: transparent;
-  font-size: 22px;
-  padding: 6px;
+  padding: 4px;
   cursor: pointer;
   border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 1;
+}
+
+.picker__emoji .twemoji {
+  width: 26px;
+  height: 26px;
+  vertical-align: middle;
+  margin: 0;
 }
 
 .picker__emoji:hover {
   background: var(--bg-hover);
+}
+
+.picker__catnav {
+  display: flex;
+  gap: 0;
+  padding: 3px 6px;
+  border-top: 1px solid var(--border);
+  overflow-x: auto;
+  align-items: center;
+  scrollbar-width: none;
+}
+
+.picker__catnav::-webkit-scrollbar {
+  display: none;
+}
+
+.picker__catnav-btn {
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border: 0;
+  background: transparent;
+  border-radius: 7px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  opacity: 0.55;
+  transition: opacity 0.12s ease;
+}
+
+.picker__catnav-btn .twemoji {
+  width: 20px;
+  height: 20px;
+  margin: 0;
+}
+
+.picker__catnav-btn:hover {
+  opacity: 1;
+  background: var(--bg-hover);
+}
+
+.picker__catnav-btn.is-active {
+  opacity: 1;
+  background: var(--accent-soft);
 }
 
 .picker__pack-head {
@@ -1120,6 +1221,38 @@ body.is-resizing {
 
 .picker__sticker:hover {
   background: var(--bg-hover);
+}
+
+.picker__sticker img {
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.sticker-preview {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.12);
+  pointer-events: none;
+}
+
+.sticker-preview__card {
+  background: var(--bg-sidebar, #fff);
+  border-radius: 22px;
+  padding: 22px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+}
+
+.sticker-preview__card img {
+  display: block;
+  width: 240px;
+  height: 240px;
+  max-width: 70vw;
+  max-height: 70vw;
+  object-fit: contain;
 }
 
 .picker__sticker img {
@@ -1177,6 +1310,48 @@ body.is-resizing {
 
 .bubble__sticker {
   line-height: 0;
+}
+
+.bubble__sticker--clickable {
+  cursor: pointer;
+}
+
+.sticker-modal-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  max-height: 340px;
+  overflow-y: auto;
+  padding: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+.sticker-modal-cell {
+  border: 0;
+  background: transparent;
+  padding: 6px;
+  cursor: pointer;
+  border-radius: 10px;
+  aspect-ratio: 1;
+  display: grid;
+  place-items: center;
+}
+
+.sticker-modal-cell:hover {
+  background: var(--bg-hover);
+}
+
+.sticker-modal-cell img {
+  max-width: 100%;
+  max-height: 84px;
+  object-fit: contain;
+}
+
+.modal__note {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 10px 2px 0;
 }
 
 .sticker-img {
@@ -1583,6 +1758,9 @@ body.is-resizing {
 }
 
 .reaction-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   border: 0;
   background: rgba(0, 0, 0, 0.06);
   border-radius: 12px;
@@ -1590,6 +1768,17 @@ body.is-resizing {
   font: inherit;
   font-size: 12px;
   cursor: pointer;
+}
+
+.reaction-chip .twemoji {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+  vertical-align: middle;
+}
+
+.reaction-chip__count {
+  font-weight: 600;
 }
 
 .reaction-chip.is-mine {
@@ -1630,6 +1819,14 @@ body.is-resizing {
   transition:
     transform 0.08s ease,
     background 0.12s ease;
+}
+
+.ctx-reaction-btn .twemoji {
+  width: 26px;
+  height: 26px;
+  margin: 0;
+  vertical-align: middle;
+  display: block;
 }
 
 .ctx-reaction-btn:hover {
@@ -1689,6 +1886,13 @@ body.is-resizing {
   cursor: pointer;
   padding: 0;
   border-radius: 8px;
+}
+
+.ctx-emoji .twemoji {
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  vertical-align: middle;
 }
 
 .ctx-emoji:hover {

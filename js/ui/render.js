@@ -7,6 +7,7 @@ import {
 } from "../media.js";
 import { stickerFileUrl } from "../stickers.js";
 import { EMOJI } from "./picker.js";
+import { emojiImg, twemojify } from "./twemoji.js";
 
 export const REACTION_EMOJIS = ["👍", "❤️", "🔥", "🎉", "😂", "😮", "😢", "🙏"];
 
@@ -447,6 +448,24 @@ export function renderThread(
         img.replaceWith(fallback);
       });
       media.append(img);
+      if (typeof opts.onOpenStickerPack === "function") {
+        media.classList.add("bubble__sticker--clickable");
+        media.setAttribute("role", "button");
+        media.setAttribute("tabindex", "0");
+        const open = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          opts.onOpenStickerPack({
+            pack: msg.sticker.pack,
+            stickerId: msg.sticker.stickerId,
+            emoji: msg.sticker.emoji,
+          });
+        };
+        media.addEventListener("click", open);
+        media.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" || e.key === " ") open(e);
+        });
+      }
       bubble.append(media);
       bubble.classList.add("bubble--sticker");
     } else if (isVideoMessage(msg, opts) && msg.mediaIds?.length) {
@@ -725,7 +744,11 @@ export function renderThread(
         chip.className =
           "reaction-chip" +
           (r.peerIds?.includes(selfPeerId) ? " is-mine" : "");
-        chip.textContent = `${r.emoji} ${r.peerIds?.length || 0}`;
+        chip.append(emojiImg(r.emoji));
+        const count = document.createElement("span");
+        count.className = "reaction-chip__count";
+        count.textContent = String(r.peerIds?.length || 0);
+        chip.append(count);
         chip.disabled = Boolean(opts.sessionEnded) || !opts.onReact;
         chip.addEventListener("click", (e) => {
           e.stopPropagation();
@@ -787,6 +810,10 @@ export function renderThread(
     };
 
     attachContextTrigger(bubble, openMenuAt);
+
+    for (const el of bubble.querySelectorAll(".bubble__text")) {
+      twemojify(el);
+    }
 
     row.append(bubble);
     return row;
@@ -988,7 +1015,7 @@ function openContextMenu(x, y, config) {
       const b = document.createElement("button");
       b.type = "button";
       b.className = "ctx-reaction-btn";
-      b.textContent = emoji;
+      b.append(emojiImg(emoji));
       b.addEventListener("click", (e) => {
         e.stopPropagation();
         react(emoji);
@@ -1009,7 +1036,7 @@ function openContextMenu(x, y, config) {
         const b = document.createElement("button");
         b.type = "button";
         b.className = "ctx-emoji";
-        b.textContent = emoji;
+        b.append(emojiImg(emoji));
         b.addEventListener("click", (ev) => {
           ev.stopPropagation();
           react(emoji);

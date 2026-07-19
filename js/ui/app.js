@@ -46,7 +46,13 @@ import {
 } from "../resume.js";
 import { selfCheckEnvelope } from "../protocol.js";
 import { ChatSession } from "../session.js";
-import { ensureFixturePacks } from "../stickers.js";
+import {
+  addPacks,
+  ensureFixturePacks,
+  fetchPack,
+  getPack,
+  stickerFileUrl,
+} from "../stickers.js";
 import { addPacksFromText, createPicker } from "./picker.js";
 import { renderChatList, renderThread } from "./render.js";
 
@@ -476,6 +482,7 @@ function paint() {
       onEdit: (messageId) => setEdit(messageId),
       onReact: (messageId, emoji) => reactToMessage(messageId, emoji),
       onForward: (messageId) => openForwardModal(messageId),
+      onOpenStickerPack: (ref) => openStickerPackModal(ref),
       onBack: () => {
         activeChatId = null;
         clearReply();
@@ -908,7 +915,7 @@ async function startFixture() {
     envOk && privacy.ok,
   );
   if (els.connStatus) els.connStatus.textContent = "Offline fixture";
-  picker.focusPack([pack.name]);
+  picker.refresh();
   paint();
 }
 
@@ -1037,12 +1044,50 @@ function openAddPacksModal() {
   );
 }
 
+/** @type {((e: Event) => void) | null} */
+let pickerOutsideHandler = null;
+/** @type {((e: KeyboardEvent) => void) | null} */
+let pickerKeyHandler = null;
+
+function closePicker() {
+  if (!els.picker || els.picker.hidden) return;
+  els.picker.hidden = true;
+  els.pickerToggle?.classList.remove("is-active");
+  if (pickerOutsideHandler) {
+    document.removeEventListener("pointerdown", pickerOutsideHandler, true);
+    pickerOutsideHandler = null;
+  }
+  if (pickerKeyHandler) {
+    document.removeEventListener("keydown", pickerKeyHandler, true);
+    pickerKeyHandler = null;
+  }
+}
+
 function togglePicker() {
   if (!els.picker || !els.pickerToggle) return;
   const open = els.picker.hidden;
-  els.picker.hidden = !open;
-  els.pickerToggle.classList.toggle("is-active", open);
-  if (open) picker.render();
+  if (!open) {
+    closePicker();
+    return;
+  }
+  els.picker.hidden = false;
+  els.pickerToggle.classList.add("is-active");
+  picker.render();
+  pickerOutsideHandler = (e) => {
+    const target = /** @type {Node} */ (e.target);
+    if (els.picker?.contains(target) || els.pickerToggle?.contains(target)) {
+      return;
+    }
+    closePicker();
+  };
+  pickerKeyHandler = (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closePicker();
+    }
+  };
+  document.addEventListener("pointerdown", pickerOutsideHandler, true);
+  document.addEventListener("keydown", pickerKeyHandler, true);
 }
 
 function closeSidebarMenu() {
@@ -1332,6 +1377,10 @@ function closeModal() {
   els.modal.hidden = true;
   modalConfirm = null;
   els.modalBody.innerHTML = "";
+  if (els.modalOk) {
+    els.modalOk.hidden = false;
+    els.modalOk.disabled = false;
+  }
 }
 
 function openModal(title, bodyBuilder, onOk, okLabel = "OK") {
@@ -1339,8 +1388,121 @@ function openModal(title, bodyBuilder, onOk, okLabel = "OK") {
   els.modalBody.innerHTML = "";
   bodyBuilder(els.modalBody);
   modalConfirm = onOk;
-  if (els.modalOk) els.modalOk.textContent = okLabel;
+  if (els.modalOk) {
+    els.modalOk.textContent = okLabel;
+    els.modalOk.hidden = false;
+    els.modalOk.disabled = false;
+  }
   els.modal.hidden = false;
+}
+
+/**
+ * Build a clickable sticker grid; clicking a sticker sends it and closes.
+ * @param {{ name: string, stickers: Array<{ id: string, emoji?: string, thumbnail_url?: string }> }} pack
+ */
+function buildStickerModalGrid(pack) {
+  const grid = document.createElement("div");
+  grid.className = "sticker-modal-grid";
+  for (const s of pack.stickers) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "sticker-modal-cell";
+    btn.title = s.emoji || s.id;
+    const img = document.createElement("img");
+    img.src = s.thumbnail_url || stickerFileUrl(pack.name, s.id);
+    img.alt = s.emoji || "sticker";
+    img.loading = "lazy";
+    img.addEventListener("error", () => {
+      img.replaceWith(document.createTextNode(s.emoji || "?"));
+    });
+    btn.append(img);
+    btn.addEventListener("click", () => {
+      sendSticker({ pack: pack.name, stickerId: s.id, emoji: s.emoji });
+      closeModal();
+    });
+    grid.append(btn);
+  }
+  return grid;
+}
+
+/**
+ * Sticker tapped in a message -> show a pack-preview modal.
+ * Installed packs offer Share; uninstalled packs offer Add.
+ * @param {{ pack: string, stickerId: string, emoji?: string }} ref
+ */
+function openStickerPackModal(ref) {
+  const installed = getPack(ref.pack);
+  if (installed) {
+    openModal(
+      installed.title || installed.name,
+      (body) => {
+        body.append(buildStickerModalGrid(installed));
+      },
+      () => {
+        const link = `https://t.me/addstickers/${installed.name}`;
+        navigator.clipboard?.writeText(link).then(
+          () => showBanner("Sticker pack link copied", true),
+          () => showBanner(link, true),
+        );
+        closeModal();
+      },
+      "Share stickers",
+    );
+    return;
+  }
+
+  openModal(
+    ref.pack,
+    (body) => {
+      const note = document.createElement("p");
+      note.className = "modal__note";
+      note.textContent = "Loading pack…";
+      body.append(note);
+    },
+    () => {},
+    "Add stickers",
+  );
+  if (els.modalOk) els.modalOk.disabled = true;
+
+  fetchPack(ref.pack)
+    .then((pack) => {
+      els.modalTitle.textContent = pack.title || pack.name;
+      els.modalBody.innerHTML = "";
+      els.modalBody.append(buildStickerModalGrid(pack));
+      if (els.modalOk) els.modalOk.disabled = false;
+      modalConfirm = async () => {
+        if (els.modalOk) els.modalOk.disabled = true;
+        const result = await addPacks([pack.name]);
+        if (result.ok.length) {
+          showBanner(`Added ${pack.title || pack.name}`, true);
+          picker.focusPack(result.ok);
+        } else {
+          showBanner("Could not add pack", false);
+        }
+        closeModal();
+      };
+    })
+    .catch(() => {
+      els.modalBody.innerHTML = "";
+      const wrap = document.createElement("div");
+      wrap.className = "sticker-modal-grid";
+      const cell = document.createElement("div");
+      cell.className = "sticker-modal-cell";
+      const img = document.createElement("img");
+      img.src = stickerFileUrl(ref.pack, ref.stickerId);
+      img.alt = ref.emoji || "sticker";
+      img.addEventListener("error", () => {
+        img.replaceWith(document.createTextNode(ref.emoji || "?"));
+      });
+      cell.append(img);
+      wrap.append(cell);
+      els.modalBody.append(wrap);
+      const note = document.createElement("p");
+      note.className = "modal__note";
+      note.textContent = "Couldn't load this pack (offline?).";
+      els.modalBody.append(note);
+      if (els.modalOk) els.modalOk.hidden = true;
+    });
 }
 
 function openNewDmModal() {
