@@ -199,6 +199,47 @@ textarea {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
+.field__input-wrap {
+  position: relative;
+  display: flex;
+}
+
+.field__input-wrap input {
+  flex: 1;
+  min-width: 0;
+  padding-right: 40px;
+}
+
+.field__eye {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.field__eye:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.field__eye svg {
+  width: 20px;
+  height: 20px;
+  display: block;
+}
+
 .field--compact span {
   font-size: 12px;
 }

@@ -36,11 +36,17 @@
           </label>
           <label class="field" id="landing-password-field">
             <span>Password (optional)</span>
-            <input id="landing-password" name="password" type="password" maxlength="128" placeholder="Set or enter a password" autocomplete="off" />
+            <div class="field__input-wrap">
+              <input id="landing-password" name="password" type="password" maxlength="128" placeholder="Set or enter a password" autocomplete="off" />
+              <button type="button" class="field__eye" data-reveal="landing-password" aria-label="Show password" aria-pressed="false"></button>
+            </div>
           </label>
           <label class="field" id="landing-identity-field">
             <span>Identity code (optional)</span>
-            <input id="identity-code" name="identityCode" type="password" maxlength="128" placeholder="A phrase only you know" autocomplete="off" />
+            <div class="field__input-wrap">
+              <input id="identity-code" name="identityCode" type="password" maxlength="128" placeholder="A phrase only you know" autocomplete="off" />
+              <button type="button" class="field__eye" data-reveal="identity-code" aria-label="Show identity code" aria-pressed="false"></button>
+            </div>
             <span class="field__hint">Shows a verified !handle by your name; reuse it anywhere to be recognized.</span>
           </label>
           <p id="landing-join-hint" class="landing__hint" hidden></p>
