@@ -805,6 +805,14 @@ body.is-resizing {
   background: var(--bg-active);
 }
 
+.chat-list__item--offline {
+  opacity: 0.72;
+}
+
+.chat-list__item--offline .chat-list__name {
+  color: var(--text-secondary);
+}
+
 .chat-list__item.is-muted .chat-list__name,
 .chat-list__item.is-muted .chat-list__preview {
   color: var(--text-secondary);

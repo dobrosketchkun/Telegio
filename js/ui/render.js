@@ -98,6 +98,8 @@ export function renderChatList(root, chats, activeId, unread, onSelect, opts = {
       (muted.has(chat.id) ? " is-muted" : "");
     btn.addEventListener("click", () => onSelect(chat.id));
 
+    if (chat.offline) btn.classList.add("chat-list__item--offline");
+
     const av = document.createElement("div");
     av.className = `avatar avatar--g${hashHue(chat.id)}`;
     av.textContent = initials(chat.title);
@@ -131,7 +133,12 @@ export function renderChatList(root, chats, activeId, unread, onSelect, opts = {
       nameIcons.append(mute);
     }
     main.querySelector(".chat-list__time").textContent = formatTime(chat.updatedAt);
-    main.querySelector(".chat-list__preview").textContent = chat.preview;
+    const previewEl = main.querySelector(".chat-list__preview");
+    previewEl.textContent = chat.offline
+      ? chat.preview
+        ? `Offline · ${chat.preview}`
+        : "Offline"
+      : chat.preview;
 
     const right = document.createElement("div");
     right.className = "chat-list__right";

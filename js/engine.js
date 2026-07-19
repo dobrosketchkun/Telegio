@@ -3,7 +3,16 @@ import { dmIdFor, mintId } from "./ids.js";
 import { sanitizeFileName } from "./media.js";
 
 /**
- * @typedef {{ peerId: string, displayName: string, role: "host" | "member", joinedAt: number, colorIndex?: number }} RosterEntry
+ * @typedef {{
+ *   peerId: string,
+ *   displayName: string,
+ *   role: "host" | "member",
+ *   joinedAt: number,
+ *   colorIndex?: number,
+ *   trip?: object,
+ *   contPub?: string,
+ *   online?: boolean,
+ * }} RosterEntry
  * @typedef {{ id: string, type: "dm" | "group", title?: string, memberPeerIds: string[], createdBy: string, createdAt: number }} Chat
  * @typedef {{
  *   id: string,
@@ -112,12 +121,23 @@ export function filterHostStateForPeer(state, peerId) {
 
 /**
  * @param {HostState} state
- * @param {Omit<RosterEntry, "joinedAt" | "colorIndex" | "role"> & { role?: "member", colorIndex?: number }} peer
+ * @param {Omit<RosterEntry, "joinedAt" | "colorIndex" | "role"> & { role?: "member", colorIndex?: number, online?: boolean, contPub?: string }} peer
  * @returns {HostState}
  */
 export function addRosterPeer(state, peer) {
-  if (rosterHas(state, peer.peerId)) return state;
   const next = clone(state);
+  const idx = next.roster.findIndex((r) => r.peerId === peer.peerId);
+  if (idx >= 0) {
+    const prev = next.roster[idx];
+    next.roster[idx] = {
+      ...prev,
+      displayName: peer.displayName || prev.displayName,
+      trip: peer.trip !== undefined ? peer.trip : prev.trip,
+      contPub: peer.contPub !== undefined ? peer.contPub : prev.contPub,
+      online: peer.online !== undefined ? peer.online : true,
+    };
+    return next;
+  }
   next.roster.push({
     peerId: peer.peerId,
     displayName: peer.displayName,
@@ -125,11 +145,31 @@ export function addRosterPeer(state, peer) {
     joinedAt: Date.now(),
     colorIndex: peer.colorIndex ?? nextColorIndex(next),
     trip: peer.trip || undefined,
+    contPub: peer.contPub || undefined,
+    online: peer.online !== undefined ? peer.online : true,
   });
   return next;
 }
 
 /**
+ * Soft presence flip — does not touch groups or membership.
+ * @param {HostState} state
+ * @param {string} peerId
+ * @param {boolean} online
+ * @returns {HostState}
+ */
+export function setRosterOnline(state, peerId, online) {
+  if (!rosterHas(state, peerId)) return state;
+  const next = clone(state);
+  next.roster = next.roster.map((r) =>
+    r.peerId === peerId ? { ...r, online: Boolean(online) } : r,
+  );
+  return next;
+}
+
+/**
+ * Hard-remove a peer from the roster and group memberships (admin-kick).
+ * Never deletes groups — only kebab Delete group does that.
  * @param {HostState} state
  * @param {string} peerId
  * @returns {HostState}
@@ -141,10 +181,75 @@ export function removeRosterPeer(state, peerId) {
   for (const chat of Object.values(next.groups)) {
     chat.memberPeerIds = chat.memberPeerIds.filter((p) => p !== peerId);
   }
-  for (const [id, chat] of Object.entries(next.groups)) {
-    if (chat.memberPeerIds.length < 2) {
-      delete next.groups[id];
-      delete next.groupMessages[id];
+  return next;
+}
+
+/**
+ * Rewrite a peerId across roster, groups, and messages (continuity / trip remap).
+ * @param {HostState} state
+ * @param {string} oldPeerId
+ * @param {string} newPeerId
+ * @param {{ displayName?: string, trip?: object, contPub?: string, online?: boolean }} [patch]
+ * @returns {HostState}
+ */
+export function remapRosterPeer(state, oldPeerId, newPeerId, patch = {}) {
+  if (!state || !oldPeerId || !newPeerId || oldPeerId === newPeerId) {
+    return state;
+  }
+  const next = clone(state);
+  const oldEntry = next.roster.find((r) => r.peerId === oldPeerId);
+  const newEntry = next.roster.find((r) => r.peerId === newPeerId);
+  next.roster = next.roster.filter(
+    (r) => r.peerId !== oldPeerId && r.peerId !== newPeerId,
+  );
+  const merged = {
+    ...(oldEntry || {}),
+    ...(newEntry || {}),
+    peerId: newPeerId,
+    displayName:
+      patch.displayName ||
+      newEntry?.displayName ||
+      oldEntry?.displayName ||
+      "Guest",
+    role: oldEntry?.role === "host" || newEntry?.role === "host" ? "host" : "member",
+    joinedAt: oldEntry?.joinedAt || newEntry?.joinedAt || Date.now(),
+    colorIndex: oldEntry?.colorIndex ?? newEntry?.colorIndex ?? nextColorIndex(next),
+    trip: patch.trip !== undefined ? patch.trip : newEntry?.trip || oldEntry?.trip,
+    contPub:
+      patch.contPub !== undefined
+        ? patch.contPub
+        : newEntry?.contPub || oldEntry?.contPub,
+    online: patch.online !== undefined ? patch.online : true,
+  };
+  next.roster.push(merged);
+
+  for (const chat of Object.values(next.groups)) {
+    chat.memberPeerIds = uniqueStrings(
+      (chat.memberPeerIds || []).map((p) => (p === oldPeerId ? newPeerId : p)),
+    );
+  }
+  for (const list of Object.values(next.groupMessages)) {
+    for (const msg of list) {
+      if (msg.senderPeerId === oldPeerId) msg.senderPeerId = newPeerId;
+      if (msg.forward?.fromPeerId === oldPeerId) {
+        msg.forward = { ...msg.forward, fromPeerId: newPeerId };
+      }
+      if (Array.isArray(msg.delivery?.ackedBy)) {
+        msg.delivery = {
+          ...msg.delivery,
+          ackedBy: uniqueStrings(
+            msg.delivery.ackedBy.map((p) => (p === oldPeerId ? newPeerId : p)),
+          ),
+        };
+      }
+      if (Array.isArray(msg.reactions)) {
+        msg.reactions = msg.reactions.map((rx) => ({
+          ...rx,
+          peerIds: uniqueStrings(
+            (rx.peerIds || []).map((p) => (p === oldPeerId ? newPeerId : p)),
+          ),
+        }));
+      }
     }
   }
   return next;
@@ -503,19 +608,9 @@ export function applyHost(state, action, ctx) {
       if (isHostPeer(next, actor)) {
         return { ok: false, error: "Host cannot leave groups; delete instead" };
       }
-      const previousMembers = [...chat.memberPeerIds];
       chat.memberPeerIds = chat.memberPeerIds.filter((p) => p !== actor);
-      if (chat.memberPeerIds.length < 2) {
-        delete next.groups[chatId];
-        delete next.groupMessages[chatId];
-        effects.push({
-          event: "chat-deleted",
-          chatId,
-          memberPeerIds: previousMembers,
-        });
-      } else {
-        effects.push({ event: "chat-created", chat: clone(chat) });
-      }
+      // Keep the group even if only one member remains — only kebab Delete group removes it.
+      effects.push({ event: "chat-created", chat: clone(chat) });
       return { ok: true, state: next, effects };
     }
 
@@ -557,19 +652,9 @@ export function applyHost(state, action, ctx) {
       next.roster = next.roster.filter((r) => r.peerId !== peerId);
       for (const [id, chat] of Object.entries(next.groups)) {
         if (!chat.memberPeerIds.includes(peerId)) continue;
-        const previousMembers = [...chat.memberPeerIds];
         chat.memberPeerIds = chat.memberPeerIds.filter((p) => p !== peerId);
-        if (chat.memberPeerIds.length < 2) {
-          delete next.groups[id];
-          delete next.groupMessages[id];
-          effects.push({
-            event: "chat-deleted",
-            chatId: id,
-            memberPeerIds: previousMembers,
-          });
-        } else {
-          effects.push({ event: "chat-created", chat: clone(chat) });
-        }
+        // Keep the group even if undersized — only kebab Delete group removes it.
+        effects.push({ event: "chat-created", chat: clone(chat) });
       }
       effects.push({ event: "peer-kicked", peerId });
       return { ok: true, state: next, effects };
@@ -1251,6 +1336,13 @@ export function listChatsForUi(hostState, dmState, selfPeerId) {
     if (!asHost && !chat.memberPeerIds.includes(selfPeerId)) continue;
     const msgs = hostState.groupMessages[chat.id] || [];
     const last = msgs[msgs.length - 1];
+    const others = chat.memberPeerIds.filter((p) => p !== selfPeerId);
+    const offline =
+      others.length > 0 &&
+      others.every((p) => {
+        const r = hostState.roster.find((e) => e.peerId === p);
+        return r && r.online === false;
+      });
     items.push({
       id: chat.id,
       kind: "group",
@@ -1258,6 +1350,7 @@ export function listChatsForUi(hostState, dmState, selfPeerId) {
       preview: previewText(last),
       updatedAt: last?.createdAt || chat.createdAt,
       memberPeerIds: chat.memberPeerIds,
+      offline,
     });
   }
 
@@ -1276,6 +1369,7 @@ export function listChatsForUi(hostState, dmState, selfPeerId) {
       memberPeerIds: chat.memberPeerIds,
       tripPeerId: otherId,
       trip: other?.trip,
+      offline: Boolean(other && other.online === false),
     });
   }
 
@@ -1437,15 +1531,15 @@ export function mergeHostSnapshots(snapshots, opts) {
     colorIndex: roster.get(opts.hostPeerId)?.colorIndex ?? 0,
     trip: opts.hostTrip || roster.get(opts.hostPeerId)?.trip || undefined,
   });
+  // Keep absent members; mark peers who did not offer state as offline so
+  // F5 / brief disconnect during handoff does not wipe memberships or chats.
   if (opts.activePeerIds?.length) {
     const active = new Set([...opts.activePeerIds, opts.hostPeerId]);
-    for (const peerId of roster.keys()) {
-      if (!active.has(peerId)) roster.delete(peerId);
-    }
-    for (const chat of Object.values(groups)) {
-      chat.memberPeerIds = (chat.memberPeerIds || []).filter((peerId) =>
-        active.has(peerId),
-      );
+    for (const [peerId, entry] of roster.entries()) {
+      roster.set(peerId, {
+        ...entry,
+        online: active.has(peerId),
+      });
     }
   }
 

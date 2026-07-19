@@ -6,6 +6,12 @@ import {
   MEDIA_TURN_HINT,
 } from "./constants.js";
 import {
+  claimContinuity,
+  continuityPubKey,
+  loadOrCreateContinuity,
+  verifyContinuity,
+} from "./continuity.js";
+import {
   addRosterPeer,
   appendSystemToGroups,
   applyDm,
@@ -18,7 +24,9 @@ import {
   filterHostStateForPeer,
   getHostPeerId,
   mergeHostSnapshots,
+  remapRosterPeer,
   removeRosterPeer,
+  setRosterOnline,
 } from "./engine.js";
 import {
   makeSessionId,
@@ -29,7 +37,7 @@ import {
 } from "./ids.js";
 import { mintInviteUrl, mintPermanentRoomUrl } from "./invite.js";
 import { error as logError, log, warn } from "./log.js";
-import { deriveHandle } from "./tripcode.js";
+import { deriveHandle, verifyHandle } from "./tripcode.js";
 import {
   blobFromBase64Chunks,
   blobSliceToBase64Url,
@@ -50,7 +58,7 @@ import {
   encodeRoomControlFrame,
   isRoomControlFrame,
 } from "./protocol.js";
-import { remapHostPeer } from "./resume.js";
+import { remapDmPeer, remapHostPeer } from "./resume.js";
 import { fetchStickerBytes, getPack, upsertPack } from "./stickers.js";
 import { getStickerBlob, putSticker } from "./sticker-cache.js";
 import {
@@ -125,6 +133,8 @@ export class ChatSession {
     this._tripcode = "";
     /** @type {{ id: string, pub: string, sig: string } | null} derived handle for this session */
     this._handle = null;
+    /** @type {import("./continuity.js").ContinuityHandle | null} */
+    this._continuity = null;
     /** @type {string} logical host id from the invite, when available */
     this._hostHint = "";
     /** @type {Map<string, MediaEntry>} blobs this peer holds (own sends + P2P downloads) */
@@ -258,6 +268,8 @@ export class ChatSession {
     this.selfPeerId = selfId;
     this.role = "host";
     this._handle = await deriveHandle(this._tripcode, selfId);
+    this._continuity = await loadOrCreateContinuity(sessionId);
+    const hostContPub = this._continuity?.pub || undefined;
     log("host", "trystero loaded", { selfId });
 
     if (opts.restoreHostState) {
@@ -277,9 +289,16 @@ export class ChatSession {
         title: title || this.hostState.session?.title || "Session",
         ended: false,
       };
-      // The handle signs the (new) peerId, so refresh the host entry's trip.
+      // Refresh host entry's trip / continuity after possible peerId change.
       this.hostState.roster = this.hostState.roster.map((r) =>
-        r.peerId === selfId ? { ...r, trip: this._handle || undefined } : r,
+        r.peerId === selfId
+          ? {
+              ...r,
+              trip: this._handle || undefined,
+              contPub: hostContPub || r.contPub,
+              online: true,
+            }
+          : r,
       );
       this.dmState = opts.restoreDmState || createEmptyDmState();
       log("host", "session resumed", { sessionId, oldHost, selfId });
@@ -294,6 +313,8 @@ export class ChatSession {
           joinedAt: Date.now(),
           colorIndex: 0,
           trip: this._handle || undefined,
+          contPub: hostContPub,
+          online: true,
         },
       });
       this.dmState = createEmptyDmState();
@@ -324,6 +345,7 @@ export class ChatSession {
     this.selfPeerId = selfId;
     this.role = "guest";
     this._handle = await deriveHandle(this._tripcode, selfId);
+    this._continuity = await loadOrCreateContinuity(sessionId);
     this.dmState = createEmptyDmState();
     this._pendingDisplayName = displayName;
     this._sessionId = sessionId;
@@ -331,7 +353,9 @@ export class ChatSession {
     log("guest", "joining", { selfId, sessionId, displayName });
 
     await this._joinRoom(joinRoom, sessionId);
-    this._sendHello(this._hostHint || undefined);
+    this._sendHello(this._hostHint || undefined).catch((err) =>
+      logError("guest", "initial hello failed", err),
+    );
     this._startHelloRetry();
     this.hooks.onStatus(this._statusLabel());
     this.hooks.onChange();
@@ -367,6 +391,7 @@ export class ChatSession {
     const { joinRoom, selfId } = await loadTrystero(sessionId, this._password);
     this.selfPeerId = selfId;
     this._handle = await deriveHandle(this._tripcode, selfId);
+    this._continuity = await loadOrCreateContinuity(sessionId);
     this._candidateIds = new Set([selfId]);
     if (
       canRestore &&
@@ -1235,7 +1260,9 @@ export class ChatSession {
         log("guest", "hello → peer join", peerId, {
           grace: Boolean(this._hostGraceTimer),
         });
-        this._sendHello(this._hostHint || peerId);
+        this._sendHello(this._hostHint || peerId).catch((err) =>
+          logError("guest", "rehello failed", err),
+        );
         if (this._hostGraceTimer) this._startHelloRetry();
       }
       this.hooks.onStatus(this._statusLabel());
@@ -1248,30 +1275,18 @@ export class ChatSession {
       this._candidateIds.delete(peerId);
       this._awaitingHello.delete(peerId);
       if (this.role === "host" && this.hostState) {
-        const leaving = this.hostState.roster.find((r) => r.peerId === peerId);
-        const name = leaving?.displayName || peerId;
-        const groupIds = Object.values(this.hostState.groups)
-          .filter((g) => g.memberPeerIds.includes(peerId))
-          .map((g) => g.id);
-        this.hostState = removeRosterPeer(this.hostState, peerId);
-        let leaveEffects = [];
-        if (groupIds.length) {
-          const sys = appendSystemToGroups(
-            this.hostState,
-            `${name} left`,
-            groupIds,
-          );
-          this.hostState = sys.state;
-          leaveEffects = sys.effects;
+        // Soft-offline only — keep roster membership and all groups/chats.
+        if (this.hostState.roster.some((r) => r.peerId === peerId)) {
+          this.hostState = setRosterOnline(this.hostState, peerId, false);
+          this.hostState = bumpHostRevision(this.hostState);
+          this._broadcastRoster();
+          this.hooks.onChange();
         }
-        this.hostState = bumpHostRevision(this.hostState);
-        this._emitEffects(leaveEffects, false);
-        this._broadcastRoster();
-        this.hooks.onChange();
       }
       if (this.role === "guest" && this.hostState) {
         const hostId = this._hostHint || getHostPeerId(this.hostState);
         if (peerId === hostId) {
+          this.hostState = setRosterOnline(this.hostState, peerId, false);
           if (this.roomMode === "permanent") {
             this._permanentHostMissing = true;
             this.hooks.onStatus("Host reconnecting (30s)");
@@ -1484,7 +1499,9 @@ export class ChatSession {
     this._candidateIds.clear();
     this._scheduleHostLease();
     if (previousHost !== hostId || !this.hostState) {
-      this._sendHello(hostId);
+      this._sendHello(hostId).catch((err) =>
+        logError("guest", "host-claim hello failed", err),
+      );
       this._startHelloRetry();
     }
     this.hooks.onStatus(this._statusLabel());
@@ -1630,63 +1647,10 @@ export class ChatSession {
     if (!this.hostState) return;
 
     if (type === "hello") {
-      log("host", "hello from", peerId, body);
-      if (body.app !== APP_ID) {
-        warn("host", "app mismatch", body.app);
-        this._send(
-          encodeFrame("error", { message: "App mismatch" }),
-          peerId,
-        );
-        return;
-      }
-      if (body.version !== APP_VERSION) {
-        warn("host", "version mismatch", body.version, "expected", APP_VERSION);
-        this._send(
-          encodeFrame("error", { message: "Version mismatch" }),
-          peerId,
-        );
-        return;
-      }
-      const displayName = String(body.displayName || "").trim() || "Guest";
-      // Handles are verified client-side (the host is not trusted for it); pass
-      // the claimed handle through so every peer can verify it independently.
-      const trip = body.trip || undefined;
       this._awaitingHello.delete(peerId);
-      const already = this.hostState.roster.some((r) => r.peerId === peerId);
-      this.hostState = addRosterPeer(this.hostState, {
-        peerId,
-        displayName,
-        trip,
-      });
-      // Do NOT post "joined the session" into groups — new peers are not members yet.
-      // Group-visible join lines happen when someone is added via add-group-members.
-      if (already) {
-        // Re-hello after refresh: refresh display name if changed
-        this.hostState = {
-          ...this.hostState,
-          roster: this.hostState.roster.map((r) =>
-            r.peerId === peerId ? { ...r, displayName, trip } : r,
-          ),
-        };
-      }
-      this.hostState = bumpHostRevision(this.hostState);
-      const filtered = filterHostStateForPeer(this.hostState, peerId);
-      log("host", "welcome →", peerId, {
-        title: this.hostState.session?.title,
-        roster: this.hostState.roster.length,
-      });
-      this._send(
-        encodeFrame("welcome", {
-          youAre: peerId,
-          session: this.hostState.session,
-          roster: this.hostState.roster,
-          state: filtered,
-        }),
-        peerId,
+      this._handleHello(body, peerId).catch((err) =>
+        logError("host", "hello failed", err),
       );
-      this._broadcastRoster();
-      this.hooks.onStatus(this._statusLabel());
-      this.hooks.onChange();
       return;
     }
 
@@ -1749,8 +1713,9 @@ export class ChatSession {
       type === "state" ||
       type === "error" ||
       type === "session-ended" ||
-      type === "peer-kicked";
-    if (type === "welcome" && !this._hostHint) {
+      type === "peer-kicked" ||
+      type === "peer-remap";
+    if (type === "welcome") {
       this._hostHint = peerId;
     }
     if (hostFrame && this._hostHint && peerId !== this._hostHint) {
@@ -1760,7 +1725,17 @@ export class ChatSession {
 
     if (type === "hello-request") {
       log("guest", "hello-request from", peerId);
-      if (!this.hostState) this._sendHello(peerId);
+      // Always answer — host may have refreshed while we still hold hostState.
+      this._sendHello(peerId).catch((err) =>
+        logError("guest", "hello-request reply failed", err),
+      );
+      return;
+    }
+
+    if (type === "peer-remap") {
+      const oldPeerId = String(body.oldPeerId || "").trim();
+      const newPeerId = String(body.newPeerId || "").trim();
+      this._applyPeerRemap(oldPeerId, newPeerId);
       return;
     }
 
@@ -1770,6 +1745,7 @@ export class ChatSession {
         warn("guest", "welcome missing state", body);
         return;
       }
+      this._hostHint = peerId;
       this._clearHostGrace();
       if (this.roomMode === "permanent") this._scheduleHostLease();
       this.ended = false;
@@ -2740,10 +2716,128 @@ export class ChatSession {
   }
 
   /**
+   * Accept a hello: soft rejoin, continuity/trip remap, then welcome.
+   * @param {object} body
+   * @param {string} peerId
+   */
+  async _handleHello(body, peerId) {
+    if (!this.hostState) return;
+    log("host", "hello from", peerId, body);
+    if (body.app !== APP_ID) {
+      warn("host", "app mismatch", body.app);
+      this._send(encodeFrame("error", { message: "App mismatch" }), peerId);
+      return;
+    }
+    if (body.version !== APP_VERSION) {
+      warn("host", "version mismatch", body.version, "expected", APP_VERSION);
+      this._send(encodeFrame("error", { message: "Version mismatch" }), peerId);
+      return;
+    }
+
+    const displayName = String(body.displayName || "").trim() || "Guest";
+    const trip = body.trip || undefined;
+    const contOk = await verifyContinuity(peerId, body.cont);
+    const contPub = contOk ? continuityPubKey(body.cont) : "";
+    const tripOk = trip ? await verifyHandle(peerId, trip) : false;
+
+    let remappedFrom = "";
+    const already = this.hostState.roster.some((r) => r.peerId === peerId);
+    if (already) {
+      this.hostState = addRosterPeer(this.hostState, {
+        peerId,
+        displayName,
+        trip,
+        contPub: contPub || undefined,
+        online: true,
+      });
+    } else {
+      let match = null;
+      if (contPub) {
+        match = this.hostState.roster.find(
+          (r) => r.contPub && r.contPub === contPub && r.peerId !== peerId,
+        );
+      }
+      if (!match && tripOk && trip?.id) {
+        match = this.hostState.roster.find(
+          (r) => r.trip?.id === trip.id && r.peerId !== peerId,
+        );
+      }
+      if (match) {
+        remappedFrom = match.peerId;
+        this.hostState = remapRosterPeer(
+          this.hostState,
+          remappedFrom,
+          peerId,
+          {
+            displayName,
+            trip: tripOk ? trip : match.trip,
+            contPub: contPub || match.contPub,
+            online: true,
+          },
+        );
+        this._applyPeerRemap(remappedFrom, peerId);
+        this._send(encodeFrame("peer-remap", { oldPeerId: remappedFrom, newPeerId: peerId }));
+        log("host", "remapped peer", remappedFrom, "→", peerId, {
+          via: contPub ? "continuity" : "trip",
+        });
+      } else {
+        this.hostState = addRosterPeer(this.hostState, {
+          peerId,
+          displayName,
+          trip,
+          contPub: contPub || undefined,
+          online: true,
+        });
+      }
+    }
+
+    this.hostState = bumpHostRevision(this.hostState);
+    const filtered = filterHostStateForPeer(this.hostState, peerId);
+    log("host", "welcome →", peerId, {
+      title: this.hostState.session?.title,
+      roster: this.hostState.roster.length,
+      remappedFrom: remappedFrom || undefined,
+    });
+    this._send(
+      encodeFrame("welcome", {
+        youAre: peerId,
+        session: this.hostState.session,
+        roster: this.hostState.roster,
+        state: filtered,
+      }),
+      peerId,
+    );
+    this._broadcastRoster();
+    this.hooks.onStatus(this._statusLabel());
+    this.hooks.onChange();
+  }
+
+  /**
+   * Rewrite local DM keys when a peer identity is remapped.
+   * @param {string} oldPeerId
+   * @param {string} newPeerId
+   */
+  _applyPeerRemap(oldPeerId, newPeerId) {
+    if (!oldPeerId || !newPeerId || oldPeerId === newPeerId) return;
+    this.dmState = remapDmPeer(this.dmState, oldPeerId, newPeerId);
+    // Guests also rewrite hostState locally if they still hold a stale copy
+    // before welcome; host already remapped via remapRosterPeer.
+    if (this.role !== "host" && this.hostState) {
+      this.hostState = remapRosterPeer(this.hostState, oldPeerId, newPeerId, {
+        online: true,
+      });
+    }
+    this.hooks.onChange();
+  }
+
+  /**
    * @param {string} [targetPeerId]
    */
-  _sendHello(targetPeerId) {
+  async _sendHello(targetPeerId) {
     const displayName = this._pendingDisplayName || "Guest";
+    const cont = this._continuity
+      ? await claimContinuity(this._continuity, this.selfPeerId)
+      : null;
     log("guest", "send hello", { targetPeerId: targetPeerId || "*", displayName });
     this._send(
       encodeFrame("hello", {
@@ -2751,6 +2845,7 @@ export class ChatSession {
         version: APP_VERSION,
         displayName,
         trip: this._handle || undefined,
+        cont: cont || undefined,
       }),
       targetPeerId,
     );
@@ -2765,7 +2860,9 @@ export class ChatSession {
       }
       if (this.connectedPeers.size) {
         log("guest", "hello retry", { peers: [...this.connectedPeers] });
-        this._sendHello(this._hostHint || undefined);
+        this._sendHello(this._hostHint || undefined).catch((err) =>
+          logError("guest", "hello retry failed", err),
+        );
       } else {
         log(
           "guest",
