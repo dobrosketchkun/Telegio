@@ -1,7 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  applyHost,
+  applyHostEvent,
   createHostState,
+  filterHostStateForPeer,
   mergeHostSnapshots,
 } from "../js/engine.js";
 import {
@@ -181,6 +184,62 @@ test("state handoff unions group history, reactions, and acknowledgements", () =
   assert.equal(merged.roster.find((p) => p.role === "host").peerId, "peer-a");
   assert.equal(merged.meta.revision, 7);
   assert.equal(merged.meta.groupRevisions.g1, 4);
+});
+
+test("new group members receive the existing message history", () => {
+  let hostState = createHostState({
+    sessionId: "namespace",
+    title: "Room",
+    hostPeer: rosterPeer("host", "Host", "host"),
+  });
+  hostState.roster.push(
+    rosterPeer("member-a", "Member A"),
+    rosterPeer("member-b", "Member B"),
+  );
+
+  const created = applyHost(
+    hostState,
+    {
+      type: "create-group",
+      title: "History",
+      memberPeerIds: ["member-a"],
+    },
+    { actorPeerId: "host" },
+  );
+  assert.equal(created.ok, true);
+  hostState = created.state;
+  const chatId = Object.keys(hostState.groups)[0];
+
+  const sent = applyHost(
+    hostState,
+    { type: "send-text", chatId, text: "message from before" },
+    { actorPeerId: "member-a" },
+  );
+  assert.equal(sent.ok, true);
+  hostState = sent.state;
+
+  let newcomerState = filterHostStateForPeer(hostState, "member-b");
+  assert.equal(newcomerState.groups[chatId], undefined);
+
+  const added = applyHost(
+    hostState,
+    {
+      type: "add-group-members",
+      chatId,
+      memberPeerIds: ["member-b"],
+    },
+    { actorPeerId: "host" },
+  );
+  assert.equal(added.ok, true);
+  for (const effect of added.effects) {
+    newcomerState = applyHostEvent(newcomerState, effect);
+  }
+
+  assert.equal(newcomerState.groups[chatId].title, "History");
+  assert.deepEqual(
+    newcomerState.groupMessages[chatId].map((entry) => entry.text),
+    ["message from before", "Host added Member B"],
+  );
 });
 
 function fakePermanentSession(selfId) {

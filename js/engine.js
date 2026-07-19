@@ -35,7 +35,7 @@ import { sanitizeFileName } from "./media.js";
  *   dms: Record<string, Chat>,
  *   dmMessages: Record<string, Message[]>,
  * }} DmState
- * @typedef {{ event: string, chatId?: string, chat?: Chat, message?: Message, messageId?: string, memberPeerIds?: string[], delivery?: { ackedBy: string[] } }} Effect
+ * @typedef {{ event: string, chatId?: string, chat?: Chat, messages?: Message[], message?: Message, messageId?: string, memberPeerIds?: string[], delivery?: { ackedBy: string[] } }} Effect
  */
 
 /**
@@ -231,7 +231,11 @@ export function applyHost(state, action, ctx) {
       if (!added.length) {
         return { ok: false, error: "Those peers are already in the group" };
       }
-      effects.push({ event: "chat-created", chat: clone(chat) });
+      effects.push({
+        event: "chat-created",
+        chat: clone(chat),
+        messages: clone(next.groupMessages[chatId] || []),
+      });
       const names = added
         .map(
           (pid) =>
@@ -687,7 +691,11 @@ export function applyHostEvent(state, body) {
       const chat = body.chat;
       if (!chat?.id) return next;
       next.groups[chat.id] = chat;
-      if (!next.groupMessages[chat.id]) next.groupMessages[chat.id] = [];
+      if (Array.isArray(body.messages)) {
+        next.groupMessages[chat.id] = clone(body.messages);
+      } else if (!next.groupMessages[chat.id]) {
+        next.groupMessages[chat.id] = [];
+      }
       return next;
     }
     case "message-added": {
