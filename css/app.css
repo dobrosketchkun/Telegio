@@ -267,6 +267,7 @@ textarea {
 }
 
 .btn--primary:hover {
+  background: var(--accent);
   filter: brightness(1.05);
   box-shadow: 0 4px 14px rgba(51, 144, 236, 0.3);
 }
