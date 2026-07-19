@@ -6,8 +6,9 @@ import {
   middleTruncate,
 } from "../media.js";
 import { stickerFileUrl } from "../stickers.js";
+import { EMOJI } from "./picker.js";
 
-export const REACTION_EMOJIS = ["👍", "❤️", "😂", "😮", "😢", "🔥"];
+export const REACTION_EMOJIS = ["👍", "❤️", "🔥", "🎉", "😂", "😮", "😢", "🙏"];
 
 /**
  * @param {HTMLElement} root
@@ -83,34 +84,32 @@ export function renderChatList(root, chats, activeId, unread, onSelect, opts = {
       right.append(badge);
     }
 
-    const menu = document.createElement("div");
-    menu.className = "chat-list__menu";
-    if (typeof opts.onTogglePin === "function") {
-      const pinBtn = document.createElement("button");
-      pinBtn.type = "button";
-      pinBtn.className = "btn btn--tiny";
-      pinBtn.textContent = pinned.has(chat.id) ? "Unpin" : "Pin";
-      pinBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        opts.onTogglePin(chat.id);
+    const buildChatActions = () => {
+      /** @type {{ label: string, danger?: boolean, onClick: () => void }[]} */
+      const actions = [];
+      if (typeof opts.onTogglePin === "function") {
+        actions.push({
+          label: pinned.has(chat.id) ? "Unpin" : "Pin",
+          onClick: () => opts.onTogglePin(chat.id),
+        });
+      }
+      if (typeof opts.onToggleMute === "function") {
+        actions.push({
+          label: muted.has(chat.id) ? "Unmute" : "Mute",
+          onClick: () => opts.onToggleMute(chat.id),
+        });
+      }
+      return actions;
+    };
+    if (buildChatActions().length) {
+      attachContextTrigger(btn, (px, py) => {
+        const actions = buildChatActions();
+        if (actions.length) openContextMenu(px, py, { actions });
       });
-      menu.append(pinBtn);
-    }
-    if (typeof opts.onToggleMute === "function") {
-      const muteBtn = document.createElement("button");
-      muteBtn.type = "button";
-      muteBtn.className = "btn btn--tiny";
-      muteBtn.textContent = muted.has(chat.id) ? "Unmute" : "Mute";
-      muteBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        opts.onToggleMute(chat.id);
-      });
-      menu.append(muteBtn);
     }
 
     btn.append(av, main, right);
     li.append(btn);
-    if (menu.childNodes.length) li.append(menu);
     root.append(li);
   }
 }
@@ -737,89 +736,57 @@ export function renderThread(
       bubble.append(rowReact);
     }
 
-    const toolbar = document.createElement("div");
-    toolbar.className = "bubble__toolbar";
-    if (!opts.sessionEnded && typeof opts.onReply === "function") {
-      const replyBtn = document.createElement("button");
-      replyBtn.type = "button";
-      replyBtn.className = "btn btn--tiny";
-      replyBtn.textContent = "Reply";
-      replyBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        opts.onReply(msg.id);
+    // —— Interactions: right-click (desktop) / long-press (touch) open a
+    // Telegram-style context menu instead of a hover toolbar. ——
+    const canReact =
+      !opts.sessionEnded && typeof opts.onReact === "function";
+    const buildActions = () => {
+      /** @type {{ label: string, danger?: boolean, onClick: () => void }[]} */
+      const actions = [];
+      if (!opts.sessionEnded && typeof opts.onReply === "function") {
+        actions.push({ label: "Reply", onClick: () => opts.onReply(msg.id) });
+      }
+      if (msg.kind === "text" && msg.text) {
+        actions.push({ label: "Copy", onClick: () => copyText(msg.text) });
+      }
+      if (!opts.sessionEnded && typeof opts.onForward === "function") {
+        actions.push({
+          label: "Forward",
+          onClick: () => opts.onForward(msg.id),
+        });
+      }
+      if (
+        !opts.sessionEnded &&
+        outgoing &&
+        msg.kind === "text" &&
+        typeof opts.onEdit === "function"
+      ) {
+        actions.push({ label: "Edit", onClick: () => opts.onEdit(msg.id) });
+      }
+      const canDelete =
+        !opts.sessionEnded &&
+        typeof opts.onDeleteMessage === "function" &&
+        (kind === "dm" ? outgoing : opts.isHost || outgoing);
+      if (canDelete) {
+        actions.push({
+          label: "Delete",
+          danger: true,
+          onClick: () => opts.onDeleteMessage(msg.id),
+        });
+      }
+      return actions;
+    };
+    const openMenuAt = (px, py) => {
+      const actions = buildActions();
+      if (!actions.length && !canReact) return;
+      openContextMenu(px, py, {
+        reactions: canReact ? REACTION_EMOJIS : null,
+        onReact: canReact ? (emoji) => opts.onReact(msg.id, emoji) : null,
+        actions,
       });
-      toolbar.append(replyBtn);
-    }
-    if (!opts.sessionEnded && typeof opts.onReact === "function") {
-      const reactBtn = document.createElement("button");
-      reactBtn.type = "button";
-      reactBtn.className = "btn btn--tiny";
-      reactBtn.textContent = "React";
-      reactBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        const picker = document.createElement("div");
-        picker.className = "reaction-picker";
-        for (const emoji of REACTION_EMOJIS) {
-          const b = document.createElement("button");
-          b.type = "button";
-          b.className = "reaction-picker__btn";
-          b.textContent = emoji;
-          b.addEventListener("click", (ev) => {
-            ev.stopPropagation();
-            picker.remove();
-            opts.onReact(msg.id, emoji);
-          });
-          picker.append(b);
-        }
-        toolbar.append(picker);
-      });
-      toolbar.append(reactBtn);
-    }
-    if (!opts.sessionEnded && typeof opts.onForward === "function") {
-      const fwdBtn = document.createElement("button");
-      fwdBtn.type = "button";
-      fwdBtn.className = "btn btn--tiny";
-      fwdBtn.textContent = "Forward";
-      fwdBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        opts.onForward(msg.id);
-      });
-      toolbar.append(fwdBtn);
-    }
-    if (
-      !opts.sessionEnded &&
-      outgoing &&
-      msg.kind === "text" &&
-      typeof opts.onEdit === "function"
-    ) {
-      const editBtn = document.createElement("button");
-      editBtn.type = "button";
-      editBtn.className = "btn btn--tiny";
-      editBtn.textContent = "Edit";
-      editBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        opts.onEdit(msg.id);
-      });
-      toolbar.append(editBtn);
-    }
-    const canDelete =
-      !opts.sessionEnded &&
-      typeof opts.onDeleteMessage === "function" &&
-      (kind === "dm"
-        ? outgoing
-        : opts.isHost || outgoing);
-    if (canDelete) {
-      const delBtn = document.createElement("button");
-      delBtn.type = "button";
-      delBtn.className = "btn btn--tiny btn--danger";
-      delBtn.textContent = "Delete";
-      delBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        opts.onDeleteMessage(msg.id);
-      });
-      toolbar.append(delBtn);
-    }
-    if (toolbar.childNodes.length) bubble.append(toolbar);
+    };
+
+    attachContextTrigger(bubble, openMenuAt);
 
     row.append(bubble);
     return row;
@@ -907,6 +874,203 @@ function buildHeaderMenu(items) {
 
   wrap.append(btn, menu);
   return wrap;
+}
+
+function copyText(text) {
+  try {
+    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text);
+  } catch {
+    /* clipboard unavailable */
+  }
+}
+
+/** @type {{ el: HTMLElement, cleanup: () => void } | null} */
+let activeMsgMenu = null;
+
+function closeMessageMenu() {
+  if (!activeMsgMenu) return;
+  activeMsgMenu.cleanup();
+  activeMsgMenu.el.remove();
+  activeMsgMenu = null;
+}
+
+/**
+ * Wire right-click (desktop) + long-press (touch) on an element to open a menu.
+ * On touch, a fired long-press suppresses the following click (so it doesn't
+ * also select the chat / trigger the bubble's default tap action).
+ * @param {HTMLElement} el
+ * @param {(x: number, y: number) => void} openAt
+ */
+function attachContextTrigger(el, openAt) {
+  el.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    openAt(e.clientX, e.clientY);
+  });
+
+  let lpTimer = null;
+  let lpFired = false;
+  const clearLp = () => {
+    if (lpTimer) {
+      clearTimeout(lpTimer);
+      lpTimer = null;
+    }
+  };
+  el.addEventListener(
+    "touchstart",
+    (e) => {
+      lpFired = false;
+      const t = e.touches[0];
+      const cx = t ? t.clientX : 0;
+      const cy = t ? t.clientY : 0;
+      clearLp();
+      lpTimer = setTimeout(() => {
+        lpFired = true;
+        openAt(cx, cy);
+      }, 450);
+    },
+    { passive: true },
+  );
+  el.addEventListener("touchmove", clearLp, { passive: true });
+  el.addEventListener("touchend", (e) => {
+    clearLp();
+    if (lpFired) e.preventDefault();
+  });
+  el.addEventListener("touchcancel", clearLp);
+  el.addEventListener("click", (e) => {
+    if (lpFired) {
+      e.preventDefault();
+      e.stopPropagation();
+      lpFired = false;
+    }
+  });
+}
+
+/**
+ * Telegram-style floating context menu: an optional reaction strip (quick emojis
+ * + a "+" that expands to the full emoji grid) plus an action list. Used for both
+ * message bubbles and chat-list items.
+ * @param {number} x
+ * @param {number} y
+ * @param {{
+ *   reactions?: string[] | null,
+ *   onReact?: ((emoji: string) => void) | null,
+ *   actions: { label: string, danger?: boolean, onClick: () => void }[],
+ * }} config
+ */
+function openContextMenu(x, y, config) {
+  closeMessageMenu();
+
+  const menu = document.createElement("div");
+  menu.className = "msg-context-menu";
+
+  const reposition = () => {
+    const rect = menu.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    let nx = x;
+    let ny = y;
+    if (nx + rect.width > vw - 8) nx = vw - rect.width - 8;
+    if (ny + rect.height > vh - 8) ny = vh - rect.height - 8;
+    menu.style.left = Math.max(8, nx) + "px";
+    menu.style.top = Math.max(8, ny) + "px";
+  };
+
+  const react = (emoji) => {
+    const fn = config.onReact;
+    closeMessageMenu();
+    fn?.(emoji);
+  };
+
+  if (config.onReact && config.reactions?.length) {
+    const strip = document.createElement("div");
+    strip.className = "ctx-reactions";
+    for (const emoji of config.reactions) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "ctx-reaction-btn";
+      b.textContent = emoji;
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        react(emoji);
+      });
+      strip.append(b);
+    }
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "ctx-reaction-btn ctx-reaction-more";
+    more.setAttribute("aria-label", "More reactions");
+    more.textContent = "+";
+    more.addEventListener("click", (e) => {
+      e.stopPropagation();
+      strip.remove();
+      const grid = document.createElement("div");
+      grid.className = "ctx-emoji-grid";
+      for (const emoji of EMOJI) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "ctx-emoji";
+        b.textContent = emoji;
+        b.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          react(emoji);
+        });
+        grid.append(b);
+      }
+      menu.prepend(grid);
+      reposition();
+    });
+    strip.append(more);
+    menu.append(strip);
+  }
+
+  if (config.actions.length) {
+    const list = document.createElement("div");
+    list.className = "ctx-actions";
+    for (const a of config.actions) {
+      const mi = document.createElement("button");
+      mi.type = "button";
+      mi.className = "menu-item" + (a.danger ? " menu-item--danger" : "");
+      mi.textContent = a.label;
+      mi.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const fn = a.onClick;
+        closeMessageMenu();
+        fn();
+      });
+      list.append(mi);
+    }
+    menu.append(list);
+  }
+
+  document.body.append(menu);
+  reposition();
+
+  const onDocDown = (e) => {
+    if (!menu.contains(e.target)) closeMessageMenu();
+  };
+  const onKey = (e) => {
+    if (e.key === "Escape") closeMessageMenu();
+  };
+  const onScroll = (e) => {
+    if (e.target && e.target.nodeType && menu.contains(e.target)) return;
+    closeMessageMenu();
+  };
+  setTimeout(() => {
+    document.addEventListener("pointerdown", onDocDown, true);
+    document.addEventListener("contextmenu", onDocDown, true);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onScroll, true);
+  }, 0);
+
+  activeMsgMenu = {
+    el: menu,
+    cleanup() {
+      document.removeEventListener("pointerdown", onDocDown, true);
+      document.removeEventListener("contextmenu", onDocDown, true);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onScroll, true);
+    },
+  };
 }
 
 /**
