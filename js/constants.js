@@ -27,4 +27,4 @@ export const VIDEO_AUTO_DOWNLOAD_BYTES = 10 * 1024 * 1024;
 
 /** TURN / large-payload guidance shown on transfer failures. */
 export const MEDIA_TURN_HINT =
-  "Transfer failed — VPN/strict NAT often blocks large media. Try without VPN, or set localStorage ephchat.turnServers (see trystero.js).";
+  "Transfer failed — no direct or peer-relayed path to a current media holder.";

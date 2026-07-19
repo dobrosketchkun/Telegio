@@ -1,8 +1,14 @@
 import { APP_ID } from "./constants.js";
+import { loadSessionIdentity } from "./identity.js";
+import { MultipathRoom } from "./multipath.js";
 
 /** Pinned Trystero MQTT strategy (jsDelivr ESM). */
 export const TRYSTERO_MQTT =
   "https://cdn.jsdelivr.net/npm/@trystero-p2p/mqtt@0.25.2/+esm";
+
+/** Pinned Trystero Nostr strategy (the default trystero package). */
+export const TRYSTERO_NOSTR =
+  "https://cdn.jsdelivr.net/npm/trystero@0.25.2/+esm";
 
 /**
  * STUN servers for ICE. STUN alone often fails across VPN / strict NAT —
@@ -41,22 +47,43 @@ export function loadExtraIceServers() {
 
 /**
  * Lazy-load Trystero so a CDN failure cannot break fixture mode.
+ * MQTT and Nostr are joined concurrently. The returned selfId is a signed,
+ * session-scoped logical ID rather than either strategy's transient ID.
+ * @param {string} sessionId
  * @returns {Promise<{ joinRoom: Function, selfId: string }>}
  */
-export async function loadTrystero() {
-  const mod = await import(TRYSTERO_MQTT);
-  if (typeof mod.joinRoom !== "function") {
-    throw new Error("Online matchmaking library failed to load");
+export async function loadTrystero(sessionId) {
+  if (!sessionId) throw new Error("Missing session id");
+  const [mqttResult, nostrResult, identity] = await Promise.all([
+    import(TRYSTERO_MQTT).catch((error) => ({ error })),
+    import(TRYSTERO_NOSTR).catch((error) => ({ error })),
+    loadSessionIdentity(sessionId),
+  ]);
+  const strategies = [];
+  if (typeof mqttResult.joinRoom === "function") {
+    strategies.push({ name: "mqtt", joinRoom: mqttResult.joinRoom });
   }
-  if (typeof mod.selfId !== "string" || !mod.selfId) {
-    throw new Error("Online matchmaking library missing selfId");
+  if (typeof nostrResult.joinRoom === "function") {
+    strategies.push({ name: "nostr", joinRoom: nostrResult.joinRoom });
   }
-  return { joinRoom: mod.joinRoom, selfId: mod.selfId };
+  if (!strategies.length) {
+    throw new Error("MQTT and Nostr matchmaking libraries failed to load");
+  }
+
+  const joinRoom = (config, roomId, callbacks) =>
+    new MultipathRoom({
+      strategies,
+      config,
+      roomId,
+      callbacks,
+      identity,
+    });
+  return { joinRoom, selfId: identity.peerId };
 }
 
 /** @deprecated use loadTrystero */
-export async function loadJoinRoom() {
-  const { joinRoom } = await loadTrystero();
+export async function loadJoinRoom(sessionId) {
+  const { joinRoom } = await loadTrystero(sessionId);
   return joinRoom;
 }
 

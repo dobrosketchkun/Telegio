@@ -11,7 +11,11 @@ import {
 import { parseMarkdownLite, toMarkdownLite } from "../entities.js";
 import { MAX_ALBUM_ITEMS, VIDEO_AUTO_DOWNLOAD_BYTES } from "../constants.js";
 import { buildFixture } from "../fixture.js";
-import { isFixtureMode, readJoinSessionId } from "../invite.js";
+import {
+  isFixtureMode,
+  readJoinHostPeerId,
+  readJoinSessionId,
+} from "../invite.js";
 import { log } from "../log.js";
 import {
   captureVideoThumbDataUrl,
@@ -116,6 +120,7 @@ const unread = Object.create(null);
 const seenMessageIds = new Map();
 
 const joinId = readJoinSessionId();
+const joinHostId = readJoinHostPeerId();
 log("boot", {
   href: location.href,
   joinId,
@@ -1061,7 +1066,11 @@ async function startOnlineGuest(displayName, sessionId, resume) {
   });
   enterAppShell({ badge: "Guest", status: "Connecting…" });
   try {
-    await session.joinGuest({ displayName, sessionId });
+    await session.joinGuest({
+      displayName,
+      sessionId,
+      hostPeerId: joinHostId || resume?.hostPeerId || undefined,
+    });
     if (resume?.dmState && resume.previousSelfPeerId) {
       session.dmState = remapDmPeer(
         resume.dmState,

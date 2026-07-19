@@ -97,6 +97,8 @@ export class ChatSession {
     this._pendingDisplayName = "";
     /** @type {string} */
     this._sessionId = "";
+    /** @type {string} logical host id from the invite, when available */
+    this._hostHint = "";
     /** @type {Map<string, MediaEntry>} blobs this peer holds (own sends + P2P downloads) */
     this.localMedia = new Map();
     /** @type {Map<string, { meta: object, chunks: string[], from: string }>} */
@@ -201,15 +203,14 @@ export class ChatSession {
   async createHost(opts) {
     const displayName = String(opts.displayName || "").trim() || "Host";
     const title = String(opts.title || "").trim() || "Session";
+    const sessionId = String(opts.sessionId || "").trim() || makeSessionId();
+    this._sessionId = sessionId;
     this.hooks.onStatus("Connecting…");
 
-    const { joinRoom, selfId } = await loadTrystero();
+    const { joinRoom, selfId } = await loadTrystero(sessionId);
     this.selfPeerId = selfId;
     this.role = "host";
     log("host", "trystero loaded", { selfId });
-
-    const sessionId = String(opts.sessionId || "").trim() || makeSessionId();
-    this._sessionId = sessionId;
 
     if (opts.restoreHostState) {
       const oldHost =
@@ -246,7 +247,7 @@ export class ChatSession {
       log("host", "session minted", { sessionId, title });
     }
 
-    this.inviteUrl = mintInviteUrl(sessionId);
+    this.inviteUrl = mintInviteUrl(sessionId, location.href, selfId);
     log("host", "invite", this.inviteUrl);
 
     await this._joinRoom(joinRoom, sessionId);
@@ -256,7 +257,7 @@ export class ChatSession {
   }
 
   /**
-   * @param {{ displayName: string, sessionId: string }} opts
+   * @param {{ displayName: string, sessionId: string, hostPeerId?: string }} opts
    */
   async joinGuest(opts) {
     const displayName = String(opts.displayName || "").trim() || "Guest";
@@ -264,16 +265,17 @@ export class ChatSession {
     if (!sessionId) throw new Error("Missing session id");
 
     this.hooks.onStatus("Connecting…");
-    const { joinRoom, selfId } = await loadTrystero();
+    const { joinRoom, selfId } = await loadTrystero(sessionId);
     this.selfPeerId = selfId;
     this.role = "guest";
     this.dmState = createEmptyDmState();
     this._pendingDisplayName = displayName;
     this._sessionId = sessionId;
+    this._hostHint = String(opts.hostPeerId || "").trim();
     log("guest", "joining", { selfId, sessionId, displayName });
 
     await this._joinRoom(joinRoom, sessionId);
-    this._sendHello();
+    this._sendHello(this._hostHint || undefined);
     this._startHelloRetry();
     this.hooks.onStatus(this._statusLabel());
     this.hooks.onChange();
@@ -328,6 +330,10 @@ export class ChatSession {
       previousHostPeerId:
         this.role === "host" ? this.selfPeerId : undefined,
       previousSelfPeerId: this.selfPeerId,
+      hostPeerId:
+        this.role === "guest"
+          ? this._hostHint || (this.hostState && getHostPeerId(this.hostState))
+          : this.selfPeerId,
     };
   }
 
@@ -1088,7 +1094,7 @@ export class ChatSession {
         log("guest", "hello → peer join", peerId, {
           grace: Boolean(this._hostGraceTimer),
         });
-        this._sendHello(peerId);
+        this._sendHello(this._hostHint || peerId);
         if (this._hostGraceTimer) this._startHelloRetry();
       }
       this.hooks.onStatus(this._statusLabel());
@@ -1125,6 +1131,11 @@ export class ChatSession {
           this._startHostGrace();
         }
       }
+      this.hooks.onStatus(this._statusLabel());
+      this.hooks.onChange();
+    };
+
+    room.onPathChange = () => {
       this.hooks.onStatus(this._statusLabel());
       this.hooks.onChange();
     };
@@ -1292,6 +1303,23 @@ export class ChatSession {
    * @param {string} peerId
    */
   _onGuestFrame(type, body, peerId) {
+    const hostFrame =
+      type === "hello-request" ||
+      type === "welcome" ||
+      type === "roster" ||
+      type === "event" ||
+      type === "state" ||
+      type === "error" ||
+      type === "session-ended" ||
+      type === "peer-kicked";
+    if (type === "welcome" && !this._hostHint) {
+      this._hostHint = peerId;
+    }
+    if (hostFrame && this._hostHint && peerId !== this._hostHint) {
+      warn("guest", "ignore host frame from non-host", type, peerId);
+      return;
+    }
+
     if (type === "hello-request") {
       log("guest", "hello-request from", peerId);
       if (!this.hostState) this._sendHello(peerId);
@@ -2112,9 +2140,12 @@ export class ChatSession {
       }
       if (this.connectedPeers.size) {
         log("guest", "hello retry", { peers: [...this.connectedPeers] });
-        this._sendHello();
+        this._sendHello(this._hostHint || undefined);
       } else {
-        log("guest", "still no WebRTC peers — MQTT may be up, ICE/TURN likely failing");
+        log(
+          "guest",
+          "still no WebRTC peers — MQTT/Nostr discovery or ICE may be failing",
+        );
       }
       this.hooks.onStatus(this._statusLabel());
     }, 2500);
@@ -2211,14 +2242,23 @@ export class ChatSession {
     if (this._hostGraceTimer) return "Host reconnecting…";
     if (this.role === "guest" && !this.hostState) {
       if (this.connectedPeers.size === 0) {
-        return "Looking for host… (VPN often blocks P2P — try without VPN)";
+        return "Looking for host over MQTT + Nostr…";
       }
-      return "Peer linked · waiting for welcome…";
+      return "Peer path found · routing to host…";
     }
     const n = this.hostState?.roster?.length || 1;
     if (this.role === "host" && n <= 1 && this.connectedPeers.size === 0) {
       return "Online · waiting for guests";
     }
+    const paths = this._room?.getPathSummary?.();
+    if (paths?.indirect) {
+      return `Connected (${n}) · relaying for ${paths.indirect}`;
+    }
+    if (paths?.mqtt && paths?.nostr) {
+      return `Connected (${n}) · MQTT + Nostr`;
+    }
+    if (paths?.nostr) return `Connected (${n}) · Nostr`;
+    if (paths?.mqtt) return `Connected (${n}) · MQTT`;
     return `Connected (${n})`;
   }
 }

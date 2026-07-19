@@ -12,6 +12,7 @@ const KEY = "ephchat.resume";
  *   title?: string,
  *   hostState?: object,
  *   dmState?: object,
+ *   hostPeerId?: string,
  *   savedAt: number,
  * }} ResumeBlob
  */
