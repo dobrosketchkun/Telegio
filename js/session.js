@@ -29,6 +29,7 @@ import {
 } from "./ids.js";
 import { mintInviteUrl, mintPermanentRoomUrl } from "./invite.js";
 import { error as logError, log, warn } from "./log.js";
+import { deriveHandle } from "./tripcode.js";
 import {
   blobFromBase64Chunks,
   blobSliceToBase64Url,
@@ -118,6 +119,10 @@ export class ChatSession {
     this._sessionId = "";
     /** @type {string} optional room password (gates topic + keys; never shared in invite) */
     this._password = "";
+    /** @type {string} optional identity-code passphrase (derives the tripcode handle) */
+    this._tripcode = "";
+    /** @type {{ id: string, pub: string, sig: string } | null} derived handle for this session */
+    this._handle = null;
     /** @type {string} logical host id from the invite, when available */
     this._hostHint = "";
     /** @type {Map<string, MediaEntry>} blobs this peer holds (own sends + P2P downloads) */
@@ -240,11 +245,13 @@ export class ChatSession {
     const sessionId = String(opts.sessionId || "").trim() || makeSessionId();
     this._sessionId = sessionId;
     this._password = String(opts.password || "");
+    this._tripcode = String(opts.tripcode || "");
     this.hooks.onStatus("Connecting…");
 
     const { joinRoom, selfId } = await loadTrystero(sessionId, this._password);
     this.selfPeerId = selfId;
     this.role = "host";
+    this._handle = await deriveHandle(this._tripcode, selfId);
     log("host", "trystero loaded", { selfId });
 
     if (opts.restoreHostState) {
@@ -264,6 +271,10 @@ export class ChatSession {
         title: title || this.hostState.session?.title || "Session",
         ended: false,
       };
+      // The handle signs the (new) peerId, so refresh the host entry's trip.
+      this.hostState.roster = this.hostState.roster.map((r) =>
+        r.peerId === selfId ? { ...r, trip: this._handle || undefined } : r,
+      );
       this.dmState = opts.restoreDmState || createEmptyDmState();
       log("host", "session resumed", { sessionId, oldHost, selfId });
     } else {
@@ -276,6 +287,7 @@ export class ChatSession {
           role: "host",
           joinedAt: Date.now(),
           colorIndex: 0,
+          trip: this._handle || undefined,
         },
       });
       this.dmState = createEmptyDmState();
@@ -292,7 +304,7 @@ export class ChatSession {
   }
 
   /**
-   * @param {{ displayName: string, sessionId: string, hostPeerId?: string, password?: string }} opts
+   * @param {{ displayName: string, sessionId: string, hostPeerId?: string, password?: string, tripcode?: string }} opts
    */
   async joinGuest(opts) {
     const displayName = String(opts.displayName || "").trim() || "Guest";
@@ -301,9 +313,11 @@ export class ChatSession {
 
     this.hooks.onStatus("Connecting…");
     this._password = String(opts.password || "");
+    this._tripcode = String(opts.tripcode || "");
     const { joinRoom, selfId } = await loadTrystero(sessionId, this._password);
     this.selfPeerId = selfId;
     this.role = "guest";
+    this._handle = await deriveHandle(this._tripcode, selfId);
     this.dmState = createEmptyDmState();
     this._pendingDisplayName = displayName;
     this._sessionId = sessionId;
@@ -321,7 +335,7 @@ export class ChatSession {
   /**
    * Join a reusable host-independent room, discover its host, or take part in
    * deterministic election when no valid host claim is reachable.
-   * @param {{ displayName: string, roomId: string, resume?: object, password?: string }} opts
+   * @param {{ displayName: string, roomId: string, resume?: object, password?: string, tripcode?: string }} opts
    */
   async enterPermanentRoom(opts) {
     const displayName = String(opts.displayName || "").trim() || "Member";
@@ -331,6 +345,7 @@ export class ChatSession {
     this.permanentRoomId = roomId;
     this._sessionId = sessionId;
     this._password = String(opts.password || "");
+    this._tripcode = String(opts.tripcode || "");
     this._pendingDisplayName = displayName;
     this.inviteUrl = mintPermanentRoomUrl(roomId);
     this.role = "candidate";
@@ -345,6 +360,7 @@ export class ChatSession {
 
     const { joinRoom, selfId } = await loadTrystero(sessionId, this._password);
     this.selfPeerId = selfId;
+    this._handle = await deriveHandle(this._tripcode, selfId);
     this._candidateIds = new Set([selfId]);
     if (
       canRestore &&
@@ -410,6 +426,7 @@ export class ChatSession {
       role: this.role,
       sessionId: this._sessionId,
       password: this._password || undefined,
+      tripcode: this._tripcode || undefined,
       displayName:
         this.hostState?.roster?.find((r) => r.peerId === this.selfPeerId)
           ?.displayName ||
@@ -1403,6 +1420,7 @@ export class ChatSession {
       title: this.permanentRoomId,
       hostPeerId: this.selfPeerId,
       hostDisplayName: this._pendingDisplayName || "Host",
+      hostTrip: this._handle || undefined,
       activePeerIds: [...this._stateOffers.keys()],
     });
     this._continuing = false;
@@ -1619,11 +1637,15 @@ export class ChatSession {
         return;
       }
       const displayName = String(body.displayName || "").trim() || "Guest";
+      // Handles are verified client-side (the host is not trusted for it); pass
+      // the claimed handle through so every peer can verify it independently.
+      const trip = body.trip || undefined;
       this._awaitingHello.delete(peerId);
       const already = this.hostState.roster.some((r) => r.peerId === peerId);
       this.hostState = addRosterPeer(this.hostState, {
         peerId,
         displayName,
+        trip,
       });
       // Do NOT post "joined the session" into groups — new peers are not members yet.
       // Group-visible join lines happen when someone is added via add-group-members.
@@ -1632,7 +1654,7 @@ export class ChatSession {
         this.hostState = {
           ...this.hostState,
           roster: this.hostState.roster.map((r) =>
-            r.peerId === peerId ? { ...r, displayName } : r,
+            r.peerId === peerId ? { ...r, displayName, trip } : r,
           ),
         };
       }
@@ -2542,6 +2564,7 @@ export class ChatSession {
         app: APP_ID,
         version: APP_VERSION,
         displayName,
+        trip: this._handle || undefined,
       }),
       targetPeerId,
     );

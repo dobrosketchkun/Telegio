@@ -38,6 +38,11 @@
             <span>Password (optional)</span>
             <input id="landing-password" name="password" type="password" maxlength="128" placeholder="Set or enter a password" autocomplete="off" />
           </label>
+          <label class="field" id="landing-identity-field">
+            <span>Identity code (optional)</span>
+            <input id="identity-code" name="identityCode" type="password" maxlength="128" placeholder="A phrase only you know" autocomplete="off" />
+            <span class="field__hint">Shows a verified !handle by your name; reuse it anywhere to be recognized.</span>
+          </label>
           <p id="landing-join-hint" class="landing__hint" hidden></p>
           <button type="submit" class="btn btn--primary" id="landing-submit">Create session</button>
         </form>

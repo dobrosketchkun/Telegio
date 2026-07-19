@@ -9,6 +9,7 @@ const KEY = "ephchat.resume";
  *   role: "host" | "guest" | "candidate",
  *   sessionId: string,
  *   password?: string,
+ *   tripcode?: string,
  *   displayName: string,
  *   title?: string,
  *   hostState?: object,

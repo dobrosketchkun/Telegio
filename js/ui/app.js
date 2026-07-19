@@ -66,6 +66,7 @@ const els = {
   landingTitleField: document.querySelector("#landing-title-field"),
   landingPassword: document.querySelector("#landing-password"),
   landingPasswordField: document.querySelector("#landing-password-field"),
+  identityCode: document.querySelector("#identity-code"),
   landingJoinHint: document.querySelector("#landing-join-hint"),
   landingSubmit: document.querySelector("#landing-submit"),
   app: document.querySelector("#app"),
@@ -401,6 +402,7 @@ function paint() {
     {
       pinnedIds: prefs.pinnedChatIds,
       mutedIds: prefs.mutedChatIds,
+      requestRepaint: schedulePaint,
       emptyHint: store.hostState.roster.length
         ? "No chats yet — start a DM or group"
         : "Share the invite so people can join",
@@ -428,6 +430,7 @@ function paint() {
     {
       isHost: asHost,
       sessionEnded: ended,
+      requestRepaint: schedulePaint,
       subtitle:
         mode === "fixture" ? "Fixture mode — no network" : "Online session",
       onDeleteGroup: () => {
@@ -1194,8 +1197,9 @@ function persistResume() {
  * @param {string} title
  * @param {import("../resume.js").ResumeBlob} [resume]
  * @param {string} [password]
+ * @param {string} [tripcode]
  */
-async function startOnlineHost(displayName, title, resume, password) {
+async function startOnlineHost(displayName, title, resume, password, tripcode) {
   mode = "online";
   session = new ChatSession({
     onChange: () => {
@@ -1218,6 +1222,7 @@ async function startOnlineHost(displayName, title, resume, password) {
       restoreHostState: resume?.hostState,
       previousHostPeerId: resume?.previousHostPeerId,
       password: password ?? resume?.password,
+      tripcode: tripcode ?? resume?.tripcode,
     });
     if (resume?.dmState && resume.previousSelfPeerId) {
       session.dmState = remapDmPeer(
@@ -1243,8 +1248,9 @@ async function startOnlineHost(displayName, title, resume, password) {
  * @param {string} sessionId
  * @param {import("../resume.js").ResumeBlob} [resume]
  * @param {string} [password]
+ * @param {string} [tripcode]
  */
-async function startOnlineGuest(displayName, sessionId, resume, password) {
+async function startOnlineGuest(displayName, sessionId, resume, password, tripcode) {
   mode = "online";
   session = new ChatSession({
     onChange: () => {
@@ -1265,6 +1271,7 @@ async function startOnlineGuest(displayName, sessionId, resume, password) {
       sessionId,
       hostPeerId: joinHostId || resume?.hostPeerId || undefined,
       password: password ?? resume?.password,
+      tripcode: tripcode ?? resume?.tripcode,
     });
     if (resume?.dmState && resume.previousSelfPeerId) {
       session.dmState = remapDmPeer(
@@ -1286,8 +1293,9 @@ async function startOnlineGuest(displayName, sessionId, resume, password) {
  * @param {string} roomId
  * @param {import("../resume.js").ResumeBlob} [resume]
  * @param {string} [password]
+ * @param {string} [tripcode]
  */
-async function startPermanentRoom(displayName, roomId, resume, password) {
+async function startPermanentRoom(displayName, roomId, resume, password, tripcode) {
   mode = "online";
   session = new ChatSession({
     onChange: () => {
@@ -1316,6 +1324,7 @@ async function startPermanentRoom(displayName, roomId, resume, password) {
       roomId,
       resume,
       password: password ?? resume?.password,
+      tripcode: tripcode ?? resume?.tripcode,
     });
     if (els.inviteBox && els.inviteUrl && session.inviteUrl) {
       els.inviteBox.hidden = false;
@@ -2429,15 +2438,17 @@ if (isFixtureMode()) {
     const displayName = els.landingName.value.trim();
     if (!displayName) return;
     const password = els.landingPassword?.value || "";
+    const tripcode = els.identityCode?.value || "";
     clearResume();
     if (joinId) {
-      startOnlineGuest(displayName, joinId, undefined, password);
+      startOnlineGuest(displayName, joinId, undefined, password, tripcode);
     } else if (els.landingRoom?.value?.trim()) {
       startPermanentRoom(
         displayName,
         els.landingRoom.value.trim(),
         undefined,
         password,
+        tripcode,
       );
     } else {
       startOnlineHost(
@@ -2445,6 +2456,7 @@ if (isFixtureMode()) {
         els.landingTitle?.value?.trim() || "",
         undefined,
         password,
+        tripcode,
       );
     }
   });

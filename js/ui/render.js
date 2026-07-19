@@ -6,10 +6,52 @@ import {
   middleTruncate,
 } from "../media.js";
 import { stickerFileUrl } from "../stickers.js";
+import { verifyHandle } from "../tripcode.js";
 import { EMOJI } from "./picker.js";
 import { emojiImg, twemojify } from "./twemoji.js";
 
 export const REACTION_EMOJIS = ["👍", "❤️", "🔥", "🎉", "😂", "😮", "😢", "🙏"];
+
+// Tripcode verification is async (Ed25519); positives are cached so the row
+// signature can pick them up on the next paint. `attemptedTrips` prevents
+// re-verifying the same claim every frame.
+const verifiedTrips = new Map();
+const attemptedTrips = new Set();
+
+/**
+ * Return the verified tripcode id for a peer, or "" if unknown/invalid. Kicks
+ * off async verification on first sight and repaints once it resolves.
+ * @param {string} peerId
+ * @param {{ id?: string, pub?: string, sig?: string } | undefined} trip
+ * @param {() => void} [requestRepaint]
+ * @returns {string}
+ */
+function verifiedTripId(peerId, trip, requestRepaint) {
+  if (!peerId || !trip?.id || !trip?.pub || !trip?.sig) return "";
+  const key = `${peerId}:${trip.sig}`;
+  if (verifiedTrips.get(key)) return trip.id;
+  if (!attemptedTrips.has(key)) {
+    attemptedTrips.add(key);
+    verifyHandle(peerId, trip)
+      .then((ok) => {
+        if (ok) {
+          verifiedTrips.set(key, true);
+          requestRepaint?.();
+        }
+      })
+      .catch(() => {});
+  }
+  return "";
+}
+
+/** @param {string} tripId */
+function makeTripBadge(tripId) {
+  const badge = document.createElement("span");
+  badge.className = "trip-badge";
+  badge.textContent = `!${tripId}`;
+  badge.title = "Verified identity code";
+  return badge;
+}
 
 const ICON_PIN =
   '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3Z"/></svg>';
@@ -71,6 +113,14 @@ export function renderChatList(root, chats, activeId, unread, onSelect, opts = {
     `;
     const nameEl = main.querySelector(".chat-list__name");
     nameEl.textContent = chat.title;
+    if (chat.kind === "dm" && chat.trip) {
+      const tripId = verifiedTripId(
+        chat.tripPeerId,
+        chat.trip,
+        opts.requestRepaint,
+      );
+      if (tripId) nameEl.append(makeTripBadge(tripId));
+    }
     const nameIcons = main.querySelector(".chat-list__nameicons");
     if (muted.has(chat.id)) {
       const mute = document.createElement("span");
@@ -193,10 +243,12 @@ export function renderThread(
       ? `${chat.memberPeerIds.length} members`
       : "private DM";
 
+  let titleTripId = "";
   if (kind === "dm") {
     const otherId = chat.memberPeerIds.find((p) => p !== selfPeerId);
     const other = hostState.roster.find((r) => r.peerId === otherId);
     title = other?.displayName || otherId || "DM";
+    titleTripId = verifiedTripId(otherId, other?.trip, opts.requestRepaint);
   }
 
   // —— Header: only rebuild when something visible changed (avoids recreating
@@ -218,6 +270,7 @@ export function renderThread(
     canAdd ? 1 : 0,
     canDeleteGroup ? 1 : 0,
     typeof opts.onBack === "function" ? 1 : 0,
+    `v:${titleTripId}`,
   ].join("~");
   if (headerEl.dataset.sig !== headerSig) {
     headerEl.dataset.sig = headerSig;
@@ -233,7 +286,9 @@ export function renderThread(
       <div class="chat-header__actions"></div>
     `;
     headerEl.querySelector(".avatar").textContent = initials(title);
-    headerEl.querySelector(".chat-header__title").textContent = title;
+    const titleEl = headerEl.querySelector(".chat-header__title");
+    titleEl.textContent = title;
+    if (titleTripId) titleEl.append(makeTripBadge(titleTripId));
     headerEl.querySelector(".chat-header__sub").textContent = sub;
 
     const backBtn = headerEl.querySelector("#chat-back");
@@ -378,6 +433,9 @@ export function renderThread(
     ];
     const sender = hostState.roster.find((r) => r.peerId === msg.senderPeerId);
     parts.push(`n:${sender?.displayName || msg.senderPeerId || ""}`);
+    parts.push(
+      `v:${verifiedTripId(msg.senderPeerId, sender?.trip, opts.requestRepaint)}`,
+    );
     if (msg.mediaIds?.length) {
       parts.push(
         "m:" +
@@ -486,6 +544,12 @@ export function renderThread(
       const ci = sender?.colorIndex ?? hashHue(msg.senderPeerId);
       name.className = `bubble__name bubble__name--c${ci % 5}`;
       name.textContent = sender?.displayName || msg.senderPeerId;
+      const tripId = verifiedTripId(
+        msg.senderPeerId,
+        sender?.trip,
+        opts.requestRepaint,
+      );
+      if (tripId) name.append(makeTripBadge(tripId));
       bubble.append(name);
     }
 

@@ -165,6 +165,12 @@ textarea {
   word-break: break-all;
 }
 
+.field__hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.35;
+}
+
 /* Author .field { display:flex } would otherwise override the HTML hidden attribute */
 [hidden] {
   display: none !important;
@@ -1086,6 +1092,18 @@ body.is-resizing {
   font-size: 13px;
   font-weight: 600;
   margin-bottom: 2px;
+}
+
+/* Verified tripcode handle shown next to a person's name. */
+.trip-badge {
+  margin-left: 5px;
+  font-family: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  font-size: 0.82em;
+  font-weight: 600;
+  color: var(--text-link);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  user-select: none;
 }
 
 .bubble__name--c0 { color: var(--name-0); }

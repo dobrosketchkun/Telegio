@@ -124,6 +124,7 @@ export function addRosterPeer(state, peer) {
     role: "member",
     joinedAt: Date.now(),
     colorIndex: peer.colorIndex ?? nextColorIndex(next),
+    trip: peer.trip || undefined,
   });
   return next;
 }
@@ -1273,6 +1274,8 @@ export function listChatsForUi(hostState, dmState, selfPeerId) {
       preview: previewText(last),
       updatedAt: last?.createdAt || chat.createdAt,
       memberPeerIds: chat.memberPeerIds,
+      tripPeerId: otherId,
+      trip: other?.trip,
     });
   }
 
@@ -1366,7 +1369,7 @@ export function bumpHostRevision(state, action = {}) {
  * Reconstruct authoritative state from the visible replicas held by reachable
  * participants after a permanent-room host election.
  * @param {HostState[]} snapshots
- * @param {{ sessionId: string, title: string, hostPeerId: string, hostDisplayName: string, activePeerIds?: string[] }} opts
+ * @param {{ sessionId: string, title: string, hostPeerId: string, hostDisplayName: string, hostTrip?: object, activePeerIds?: string[] }} opts
  */
 export function mergeHostSnapshots(snapshots, opts) {
   const valid = (snapshots || []).filter(
@@ -1389,6 +1392,7 @@ export function mergeHostSnapshots(snapshots, opts) {
           role: "host",
           joinedAt: Date.now(),
           colorIndex: 0,
+          trip: opts.hostTrip || undefined,
         },
       });
 
@@ -1431,6 +1435,7 @@ export function mergeHostSnapshots(snapshots, opts) {
     role: "host",
     joinedAt: roster.get(opts.hostPeerId)?.joinedAt || Date.now(),
     colorIndex: roster.get(opts.hostPeerId)?.colorIndex ?? 0,
+    trip: opts.hostTrip || roster.get(opts.hostPeerId)?.trip || undefined,
   });
   if (opts.activePeerIds?.length) {
     const active = new Set([...opts.activePeerIds, opts.hostPeerId]);
