@@ -3,16 +3,17 @@
 
   --bg-app: #e7ebf0;
   --bg-sidebar: #ffffff;
-  --bg-chat: #8ea9c1;
-  --bg-chat-pattern: rgba(255, 255, 255, 0.06);
+  --bg-chat: #7f9cb5;
+  --bg-chat-pattern: rgba(255, 255, 255, 0.07);
   --bg-header: #ffffff;
   --bg-compose: #ffffff;
   --bg-input: #ffffff;
-  --bg-hover: #f4f4f5;
-  --bg-active: #f0f2f5;
+  --bg-hover: #f3f4f6;
+  --bg-active: #eaf2fb;
+  --bg-pinned: #f6f8fb;
 
   --bubble-in: #ffffff;
-  --bubble-out: #effdde;
+  --bubble-out: #eeffde;
   --bubble-meta: #a0acb6;
   --bubble-out-meta: #4fae4e;
 

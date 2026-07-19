@@ -11,6 +11,11 @@ import { emojiImg, twemojify } from "./twemoji.js";
 
 export const REACTION_EMOJIS = ["👍", "❤️", "🔥", "🎉", "😂", "😮", "😢", "🙏"];
 
+const ICON_PIN =
+  '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true"><path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3Z"/></svg>';
+const ICON_MUTE =
+  '<svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true"><path d="M12 3a5 5 0 0 0-5 5v2.6c0 .8-.3 1.6-.9 2.2L4 15h6m4 0h4l-1.1-1.1c-.6-.6-.9-1.4-.9-2.2V8a5 5 0 0 0-2.3-4.2M10 18a2 2 0 0 0 4 0" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><line x1="4" y1="3" x2="20" y2="21" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+
 /**
  * @param {HTMLElement} root
  * @param {Array<{ id: string, kind: string, title: string, preview: string, updatedAt: number }>} chats
@@ -59,13 +64,21 @@ export function renderChatList(root, chats, activeId, unread, onSelect, opts = {
     main.innerHTML = `
       <div class="chat-list__row">
         <span class="chat-list__name"></span>
+        <span class="chat-list__nameicons"></span>
         <span class="chat-list__time"></span>
       </div>
       <div class="chat-list__preview"></div>
     `;
     const nameEl = main.querySelector(".chat-list__name");
-    nameEl.textContent =
-      (pinned.has(chat.id) ? "📌 " : "") + chat.title;
+    nameEl.textContent = chat.title;
+    const nameIcons = main.querySelector(".chat-list__nameicons");
+    if (muted.has(chat.id)) {
+      const mute = document.createElement("span");
+      mute.className = "chat-list__icon chat-list__icon--mute";
+      mute.innerHTML = ICON_MUTE;
+      mute.title = "Muted";
+      nameIcons.append(mute);
+    }
     main.querySelector(".chat-list__time").textContent = formatTime(chat.updatedAt);
     main.querySelector(".chat-list__preview").textContent = chat.preview;
 
@@ -73,9 +86,7 @@ export function renderChatList(root, chats, activeId, unread, onSelect, opts = {
     right.className = "chat-list__right";
     const kind = document.createElement("div");
     kind.className = "chat-list__kind";
-    kind.textContent =
-      (muted.has(chat.id) ? "🔇 " : "") +
-      (chat.kind === "dm" ? "DM" : "Group");
+    kind.textContent = chat.kind === "dm" ? "DM" : "Group";
     right.append(kind);
     const count = muted.has(chat.id) ? 0 : unread[chat.id] || 0;
     if (count > 0) {
@@ -83,6 +94,12 @@ export function renderChatList(root, chats, activeId, unread, onSelect, opts = {
       badge.className = "unread-badge";
       badge.textContent = count > 99 ? "99+" : String(count);
       right.append(badge);
+    } else if (pinned.has(chat.id)) {
+      const pin = document.createElement("span");
+      pin.className = "chat-list__icon chat-list__icon--pin";
+      pin.innerHTML = ICON_PIN;
+      pin.title = "Pinned";
+      right.append(pin);
     }
 
     const buildChatActions = () => {
@@ -264,16 +281,58 @@ export function renderThread(
     }
   }
 
+  const dayKeyOf = (m) =>
+    m && m.createdAt ? new Date(m.createdAt).toDateString() : "";
+
   const desired = [];
+  let prevDayKey = null;
   messages.forEach((msg, index) => {
+    const isSystem = msg.kind === "system";
+    const dayKey = dayKeyOf(msg);
+
+    // Date separator whenever the calendar day changes.
+    if (!isSystem && dayKey && dayKey !== prevDayKey) {
+      const sepMid = `date:${dayKey}`;
+      const sepSig = `date~${dayKey}`;
+      const oldSep = existing.get(sepMid);
+      let sepNode;
+      if (oldSep && oldSep.dataset.sig === sepSig) {
+        sepNode = oldSep;
+      } else {
+        sepNode = buildDateSeparator(msg.createdAt);
+        sepNode.dataset.mid = sepMid;
+        sepNode.dataset.sig = sepSig;
+      }
+      desired.push(sepNode);
+      prevDayKey = dayKey;
+    }
+
+    // Run grouping: consecutive non-system messages from the same sender on the
+    // same day form a "run" (drives avatar, tail, and sender-name display).
+    const prev = messages[index - 1];
+    const next = messages[index + 1];
+    const sameAsPrev =
+      !isSystem &&
+      prev &&
+      prev.kind !== "system" &&
+      prev.senderPeerId === msg.senderPeerId &&
+      dayKeyOf(prev) === dayKey;
+    const sameAsNext =
+      !isSystem &&
+      next &&
+      next.kind !== "system" &&
+      next.senderPeerId === msg.senderPeerId &&
+      dayKeyOf(next) === dayKey;
+    const flags = { firstOfRun: !sameAsPrev, lastOfRun: !sameAsNext };
+
     const mid = msg.id || `sys:${msg.createdAt || 0}:${index}`;
-    const sig = sigFor(msg);
+    const sig = sigFor(msg, flags);
     const old = existing.get(mid);
     let node;
     if (old && old.dataset.sig === sig) {
       node = old;
     } else {
-      node = buildRow(msg);
+      node = buildRow(msg, flags);
       node.dataset.mid = mid;
       node.dataset.sig = sig;
       if (old) preservePlayingMedia(old, node);
@@ -301,8 +360,9 @@ export function renderThread(
   /**
    * Compact per-message signature: rebuild the row only when one of these changes.
    * @param {import("../engine.js").Message} msg
+   * @param {{ firstOfRun: boolean, lastOfRun: boolean }} [flags]
    */
-  function sigFor(msg) {
+  function sigFor(msg, flags) {
     if (msg.kind === "system") return `sys~${msg.text || ""}`;
     const outgoing = msg.senderPeerId === selfPeerId;
     const parts = [
@@ -314,6 +374,7 @@ export function renderThread(
       msg.sticker ? `st:${msg.sticker.pack}/${msg.sticker.stickerId}` : "",
       `o:${outgoing ? 1 : 0}`,
       `t:${msg.createdAt || 0}`,
+      `g:${flags?.firstOfRun ? 1 : 0}${flags?.lastOfRun ? 1 : 0}`,
     ];
     const sender = hostState.roster.find((r) => r.peerId === msg.senderPeerId);
     parts.push(`n:${sender?.displayName || msg.senderPeerId || ""}`);
@@ -376,8 +437,11 @@ export function renderThread(
     return parts.join("~");
   }
 
-  /** @param {import("../engine.js").Message} msg */
-  function buildRow(msg) {
+  /**
+   * @param {import("../engine.js").Message} msg
+   * @param {{ firstOfRun: boolean, lastOfRun: boolean }} [flags]
+   */
+  function buildRow(msg, flags = { firstOfRun: true, lastOfRun: true }) {
     if (msg.kind === "system") {
       const sys = document.createElement("div");
       sys.className = "system-msg";
@@ -386,14 +450,37 @@ export function renderThread(
     }
 
     const outgoing = msg.senderPeerId === selfPeerId;
+    const groupIncoming = kind === "group" && !outgoing;
     const row = document.createElement("div");
     row.className =
-      "message-row " + (outgoing ? "message-row--out" : "message-row--in");
+      "message-row " +
+      (outgoing ? "message-row--out" : "message-row--in") +
+      (flags.lastOfRun ? " message-row--run-end" : "");
+
+    // Group incoming: reserve a left gutter for the sender avatar; the avatar
+    // itself only shows on the last bubble of the run (Telegram-style).
+    if (groupIncoming) {
+      const gutter = document.createElement("div");
+      gutter.className = "message-row__avatar";
+      if (flags.lastOfRun) {
+        const sender = hostState.roster.find(
+          (r) => r.peerId === msg.senderPeerId,
+        );
+        gutter.classList.add("avatar", `avatar--g${hashHue(msg.senderPeerId)}`);
+        gutter.textContent = initials(sender?.displayName || msg.senderPeerId);
+      } else {
+        gutter.classList.add("message-row__avatar--spacer");
+      }
+      row.append(gutter);
+    }
 
     const bubble = document.createElement("div");
-    bubble.className = "bubble " + (outgoing ? "bubble--out" : "bubble--in");
+    bubble.className =
+      "bubble " +
+      (outgoing ? "bubble--out" : "bubble--in") +
+      (flags.lastOfRun ? " bubble--tail" : "");
 
-    if (kind === "group" && !outgoing) {
+    if (groupIncoming && flags.firstOfRun) {
       const sender = hostState.roster.find((r) => r.peerId === msg.senderPeerId);
       const name = document.createElement("div");
       const ci = sender?.colorIndex ?? hashHue(msg.senderPeerId);
@@ -1324,4 +1411,40 @@ function formatTime(ts) {
   } catch {
     return "";
   }
+}
+
+/**
+ * Human day label for a date-separator pill: "Today" / "Yesterday" / localized date.
+ * @param {number} ts
+ */
+function formatDayLabel(ts) {
+  const d = new Date(ts);
+  const today = new Date();
+  const startOf = (x) =>
+    new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const dayMs = 86400000;
+  const diffDays = Math.round((startOf(today) - startOf(d)) / dayMs);
+  if (diffDays === 0) return "Today";
+  if (diffDays === 1) return "Yesterday";
+  try {
+    const sameYear = d.getFullYear() === today.getFullYear();
+    return new Intl.DateTimeFormat(undefined, {
+      day: "numeric",
+      month: "long",
+      ...(sameYear ? {} : { year: "numeric" }),
+    }).format(d);
+  } catch {
+    return d.toDateString();
+  }
+}
+
+/** @param {number} ts */
+function buildDateSeparator(ts) {
+  const wrap = document.createElement("div");
+  wrap.className = "date-sep";
+  const pill = document.createElement("span");
+  pill.className = "date-sep__pill";
+  pill.textContent = formatDayLabel(ts);
+  wrap.append(pill);
+  return wrap;
 }

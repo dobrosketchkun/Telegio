@@ -114,27 +114,48 @@ textarea {
 .landing__card {
   width: min(420px, 100%);
   background: var(--bg-sidebar);
-  border-radius: 16px;
-  padding: 28px 24px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
+  border-radius: 18px;
+  padding: 32px 28px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.12);
+}
+
+.landing__brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.landing__logo {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--text-on-accent);
+  box-shadow: 0 4px 12px rgba(51, 144, 236, 0.35);
+  flex-shrink: 0;
 }
 
 .landing__title {
-  margin: 0 0 6px;
-  font-size: 1.5rem;
+  margin: 0;
+  font-size: 1.7rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
 }
 
 .landing__sub {
-  margin: 0 0 20px;
+  margin: 0 0 22px;
   color: var(--text-secondary);
   font-size: 14px;
-  line-height: 1.4;
+  line-height: 1.45;
 }
 
 .landing__form {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
 }
 
 .landing__hint {
@@ -163,6 +184,13 @@ textarea {
   padding: 10px 12px;
   color: var(--text-primary);
   background: #fff;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.field input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .field--compact span {
@@ -186,10 +214,19 @@ textarea {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--text-on-accent);
+  font-weight: 600;
+  padding: 10px 12px;
+  transition: filter 0.15s, box-shadow 0.15s;
 }
 
 .btn--primary:hover {
   filter: brightness(1.05);
+  box-shadow: 0 4px 14px rgba(51, 144, 236, 0.3);
+}
+
+.btn--primary:active {
+  filter: brightness(0.97);
+  box-shadow: none;
 }
 
 .btn--small {
@@ -429,6 +466,10 @@ textarea {
   color: var(--text-primary);
 }
 
+.icon-btn:active {
+  background: var(--bg-active);
+}
+
 .icon-btn.is-active {
   color: var(--accent);
   background: var(--accent-soft);
@@ -474,6 +515,10 @@ textarea {
 
 .menu-item:hover {
   background: var(--bg-hover);
+}
+
+.menu-item:active {
+  background: var(--bg-active);
 }
 
 .menu-item:disabled {
@@ -591,6 +636,10 @@ body.is-resizing {
   background: var(--bg-hover);
 }
 
+.chat-list__item:active {
+  background: var(--bg-active);
+}
+
 .chat-list__item.is-active {
   background: var(--bg-active);
 }
@@ -620,12 +669,13 @@ body.is-resizing {
 
 .chat-list__row {
   display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  align-items: baseline;
+  gap: 6px;
+  align-items: center;
 }
 
 .chat-list__name {
+  flex: 1;
+  min-width: 0;
   font-weight: 600;
   font-size: 14px;
   white-space: nowrap;
@@ -633,10 +683,28 @@ body.is-resizing {
   text-overflow: ellipsis;
 }
 
+.chat-list__nameicons {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+}
+
+.chat-list__icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-secondary);
+}
+
+.chat-list__icon--pin {
+  color: var(--text-secondary);
+}
+
 .chat-list__time {
   font-size: 12px;
   color: var(--text-secondary);
   flex-shrink: 0;
+  margin-left: auto;
 }
 
 .chat-list__preview {
@@ -668,10 +736,35 @@ body.is-resizing {
   border-radius: 10px;
   background: var(--unread);
   color: #fff;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
+  line-height: 1;
   display: grid;
   place-items: center;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
+}
+
+.chat-list__item.is-pinned {
+  background: var(--bg-pinned, rgba(0, 0, 0, 0.03));
+}
+
+.chat-list__item.is-pinned:hover {
+  background: var(--bg-hover);
+}
+
+.chat-list__item.is-active,
+.chat-list__item.is-pinned.is-active {
+  background: var(--bg-active);
+}
+
+.chat-list__item.is-muted .chat-list__name,
+.chat-list__item.is-muted .chat-list__preview {
+  color: var(--text-secondary);
+}
+
+.chat-list__item.is-muted .unread-badge {
+  background: var(--text-secondary);
+  opacity: 0.7;
 }
 
 /* —— Main —— */
@@ -747,7 +840,7 @@ body.is-resizing {
   padding: 16px 12% 20px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 2px;
 }
 
 .jump-fab {
@@ -885,8 +978,28 @@ body.is-resizing {
   margin: 4px 0;
 }
 
+.date-sep {
+  align-self: center;
+  display: flex;
+  justify-content: center;
+  margin: 10px 0 8px;
+  pointer-events: none;
+}
+
+.date-sep__pill {
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+  color: rgba(255, 255, 255, 0.95);
+  background: rgba(0, 0, 0, 0.28);
+  padding: 4px 12px;
+  border-radius: 12px;
+  backdrop-filter: blur(2px);
+}
+
 .message-row {
   display: flex;
+  align-items: flex-end;
   max-width: min(520px, 100%);
 }
 
@@ -898,7 +1011,26 @@ body.is-resizing {
   align-self: flex-start;
 }
 
+/* extra breathing room only after the last bubble of a run */
+.message-row--run-end {
+  margin-bottom: 6px;
+}
+
+.message-row__avatar {
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  margin-right: 7px;
+  font-size: 12px;
+  align-self: flex-end;
+}
+
+.message-row__avatar--spacer {
+  background: transparent;
+}
+
 .bubble {
+  position: relative;
   padding: 8px 10px 4px;
   border-radius: var(--radius-bubble);
   box-shadow: var(--shadow-soft);
@@ -906,14 +1038,48 @@ body.is-resizing {
   overflow-wrap: anywhere;
 }
 
+/* Stacked (non-tail) bubbles keep a smaller radius on the tail side so a run
+   reads as one connected column; the tail bubble gets the sharp corner + flare. */
 .bubble--in {
   background: var(--bubble-in);
-  border-bottom-left-radius: 4px;
+  border-bottom-left-radius: 6px;
 }
 
 .bubble--out {
   background: var(--bubble-out);
-  border-bottom-right-radius: 4px;
+  border-bottom-right-radius: 6px;
+}
+
+.bubble--in.bubble--tail {
+  border-bottom-left-radius: 3px;
+}
+
+.bubble--out.bubble--tail {
+  border-bottom-right-radius: 3px;
+}
+
+.bubble--in.bubble--tail::before {
+  content: "";
+  position: absolute;
+  left: -6px;
+  bottom: 0;
+  width: 11px;
+  height: 15px;
+  background: var(--bubble-in);
+  clip-path: path("M11 0 C 11 8 8 14 0 15 C 5 12 8 9 8 0 Z");
+  pointer-events: none;
+}
+
+.bubble--out.bubble--tail::before {
+  content: "";
+  position: absolute;
+  right: -6px;
+  bottom: 0;
+  width: 11px;
+  height: 15px;
+  background: var(--bubble-out);
+  clip-path: path("M0 0 C 0 8 3 14 11 15 C 6 12 3 9 3 0 Z");
+  pointer-events: none;
 }
 
 .bubble__name {
