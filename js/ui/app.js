@@ -2362,6 +2362,27 @@ window.addEventListener("pagehide", () => {
   session?.leave({ endSession: false });
 });
 
+const EYE_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>';
+const EYE_OFF_ICON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.9 4.24A9.1 9.1 0 0 1 12 4c6.5 0 10 7 10 7a13.3 13.3 0 0 1-2.16 2.9M6.6 6.6A13.3 13.3 0 0 0 2 11s3.5 7 10 7a9 9 0 0 0 4.28-1.06M9.9 9.9a3 3 0 1 0 4.24 4.24"/><line x1="3" y1="3" x2="21" y2="21"/></svg>';
+
+/** Wire show/hide toggles for password-style inputs. */
+function initPasswordReveals() {
+  for (const btn of document.querySelectorAll(".field__eye")) {
+    const input = document.getElementById(btn.dataset.reveal);
+    if (!input) continue;
+    btn.innerHTML = EYE_ICON;
+    btn.addEventListener("click", () => {
+      const reveal = input.type === "password";
+      input.type = reveal ? "text" : "password";
+      btn.innerHTML = reveal ? EYE_OFF_ICON : EYE_ICON;
+      btn.setAttribute("aria-pressed", reveal ? "true" : "false");
+    });
+  }
+}
+initPasswordReveals();
+
 if (isFixtureMode()) {
   startFixture();
 } else {
