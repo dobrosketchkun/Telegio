@@ -136,7 +136,7 @@ export function renderChatList(root, chats, activeId, unread, onSelect, opts = {
  *   getMediaUrl?: (mediaId: string) => string | null,
  *   getPlayableMediaUrl?: (mediaId: string, gate?: object) => string | null,
  *   getMediaMime?: (mediaId: string) => string | null,
- *   onOpenMedia?: (url: string) => void,
+ *   onOpenMedia?: (mediaId: string, messageId: string) => void,
  *   onDownloadMedia?: (mediaId: string) => void,
  * }} [opts]
  */
@@ -491,6 +491,7 @@ export function renderThread(
         video.controls = true;
         video.playsInline = true;
         video.preload = "metadata";
+        if (info?.thumbDataUrl) video.poster = info.thumbDataUrl;
         wrap.append(video);
       } else if (needsDownload || size > VIDEO_AUTO_DOWNLOAD_BYTES) {
         const btn = document.createElement("button");
@@ -542,12 +543,7 @@ export function renderThread(
       const needsDownload =
         !outgoing && size > VIDEO_AUTO_DOWNLOAD_BYTES && !url;
       if (url) {
-        const audio = document.createElement("audio");
-        audio.className = "media-audio";
-        audio.src = url;
-        audio.controls = true;
-        audio.preload = "metadata";
-        wrap.append(audio);
+        wrap.append(buildAudioPlayer(url));
       } else if (needsDownload || size > VIDEO_AUTO_DOWNLOAD_BYTES) {
         const btn = document.createElement("button");
         btn.type = "button";
@@ -669,7 +665,7 @@ export function renderThread(
           img.loading = "lazy";
           img.addEventListener("click", (e) => {
             e.stopPropagation();
-            opts.onOpenMedia?.(url);
+            opts.onOpenMedia?.(mid, msg.id);
           });
           wrap.append(img);
         } else {
@@ -833,10 +829,138 @@ function preservePlayingMedia(oldRow, newRow) {
   const live =
     !oldMedia.paused || oldMedia.currentTime > 0 || oldMedia.seeking;
   if (!live) return;
+  // Audio has custom controls wired to this specific element, so transplant
+  // the whole player container to keep the UI in sync. Video's controls live
+  // on the element itself, so moving just the element suffices.
+  if (oldMedia.tagName === "AUDIO") {
+    const oldWrap = oldMedia.closest(".bubble__audio");
+    const newWrap = newRow.querySelector(".bubble__audio");
+    if (oldWrap && newWrap) {
+      newWrap.replaceWith(oldWrap);
+      return;
+    }
+  }
   const newMedia = newRow.querySelector(oldMedia.tagName.toLowerCase());
   if (newMedia && newMedia.src === oldMedia.src) {
     newMedia.replaceWith(oldMedia);
   }
+}
+
+/** @param {number} sec */
+function formatDuration(sec) {
+  if (!isFinite(sec) || sec < 0) sec = 0;
+  const m = Math.floor(sec / 60);
+  const s = Math.floor(sec % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+/**
+ * Custom audio player: a hidden <audio> plus a play/pause button, a wide
+ * draggable seek bar, and current/duration time labels.
+ * @param {string} url
+ * @returns {HTMLElement}
+ */
+function buildAudioPlayer(url) {
+  const PLAY =
+    '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>';
+  const PAUSE =
+    '<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>';
+
+  const player = document.createElement("div");
+  player.className = "audio-player";
+
+  const audio = document.createElement("audio");
+  audio.className = "media-audio";
+  audio.src = url;
+  audio.preload = "metadata";
+
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "audio-player__btn";
+  btn.setAttribute("aria-label", "Play");
+  btn.innerHTML = PLAY;
+
+  const body = document.createElement("div");
+  body.className = "audio-player__body";
+
+  const seek = document.createElement("input");
+  seek.type = "range";
+  seek.className = "audio-player__seek";
+  seek.min = "0";
+  seek.max = "100";
+  seek.step = "0.1";
+  seek.value = "0";
+
+  const times = document.createElement("div");
+  times.className = "audio-player__times";
+  const cur = document.createElement("span");
+  cur.className = "audio-player__time";
+  cur.textContent = "0:00";
+  const dur = document.createElement("span");
+  dur.className = "audio-player__time";
+  dur.textContent = "0:00";
+  times.append(cur, dur);
+
+  body.append(seek, times);
+  player.append(btn, audio, body);
+
+  let dragging = false;
+  const setFill = () => {
+    const max = Number(seek.max) || 1;
+    const pct = (Number(seek.value) / max) * 100;
+    seek.style.setProperty("--seek", `${pct}%`);
+  };
+
+  btn.addEventListener("click", () => {
+    if (audio.paused) audio.play();
+    else audio.pause();
+  });
+  audio.addEventListener("play", () => {
+    btn.innerHTML = PAUSE;
+    btn.setAttribute("aria-label", "Pause");
+  });
+  audio.addEventListener("pause", () => {
+    btn.innerHTML = PLAY;
+    btn.setAttribute("aria-label", "Play");
+  });
+  // Blob/streamed audio often reports duration = Infinity at loadedmetadata and
+  // only resolves the real value later via durationchange, so handle both.
+  const applyDuration = () => {
+    if (isFinite(audio.duration) && audio.duration > 0) {
+      seek.max = String(audio.duration);
+      dur.textContent = formatDuration(audio.duration);
+      setFill();
+    }
+  };
+  audio.addEventListener("loadedmetadata", applyDuration);
+  audio.addEventListener("durationchange", applyDuration);
+  audio.addEventListener("timeupdate", () => {
+    if (dragging) return;
+    seek.value = String(audio.currentTime);
+    cur.textContent = formatDuration(audio.currentTime);
+    setFill();
+  });
+  audio.addEventListener("ended", () => {
+    btn.innerHTML = PLAY;
+    btn.setAttribute("aria-label", "Play");
+    seek.value = "0";
+    cur.textContent = "0:00";
+    setFill();
+  });
+  seek.addEventListener("pointerdown", () => {
+    dragging = true;
+  });
+  seek.addEventListener("input", () => {
+    cur.textContent = formatDuration(Number(seek.value));
+    setFill();
+  });
+  seek.addEventListener("change", () => {
+    audio.currentTime = Number(seek.value);
+    dragging = false;
+  });
+
+  setFill();
+  return player;
 }
 
 /**

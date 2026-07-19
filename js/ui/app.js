@@ -111,6 +111,10 @@ const els = {
   uploadStatus: document.querySelector("#upload-status"),
   lightbox: document.querySelector("#lightbox"),
   lightboxImg: document.querySelector("#lightbox-img"),
+  lightboxPrev: document.querySelector("#lightbox-prev"),
+  lightboxNext: document.querySelector("#lightbox-next"),
+  lightboxClose: document.querySelector("#lightbox-close"),
+  lightboxCounter: document.querySelector("#lightbox-counter"),
 };
 
 /** @type {"fixture" | "online" | null} */
@@ -493,7 +497,8 @@ function paint() {
       getPlayableMediaUrl: (mediaId, gate) =>
         resolvePlayableMediaUrl(mediaId, gate),
       getMediaMime: (mediaId) => resolveMediaMime(mediaId),
-      onOpenMedia: (url) => openLightbox(url),
+      onOpenMedia: (mediaId, messageId) =>
+        openLightboxGallery(mediaId, messageId),
       onDownloadMedia: (mediaId) => {
         if (mode === "online" && session) {
           session.unlockMedia(mediaId);
@@ -1655,16 +1660,83 @@ function resolveMediaUrl(mediaId) {
   return null;
 }
 
-function openLightbox(url) {
-  if (!els.lightbox || !els.lightboxImg || !url) return;
-  els.lightboxImg.src = url;
+/** @type {{ items: { mediaId: string, messageId: string }[], index: number }} */
+let gallery = { items: [], index: 0 };
+
+function getActiveThread() {
+  const store = getStore();
+  if (!store || !activeChatId) return null;
+  return getChatThread(store.hostState, store.dmState, activeChatId);
+}
+
+/** Ordered list of viewable images (single photos + album frames) in the thread. */
+function buildGalleryItems() {
+  const thread = getActiveThread();
+  /** @type {{ mediaId: string, messageId: string }[]} */
+  const items = [];
+  if (!thread?.messages) return items;
+  for (const msg of thread.messages) {
+    if (msg.kind !== "media" && msg.kind !== "album") continue;
+    for (const mediaId of msg.mediaIds || []) {
+      if (resolveMediaUrl(mediaId)) items.push({ mediaId, messageId: msg.id });
+    }
+  }
+  return items;
+}
+
+function openLightboxGallery(mediaId, messageId) {
+  if (!els.lightbox || !els.lightboxImg) return;
+  gallery.items = buildGalleryItems();
+  let idx = gallery.items.findIndex(
+    (it) => it.mediaId === mediaId && it.messageId === messageId,
+  );
+  if (idx < 0) idx = gallery.items.findIndex((it) => it.mediaId === mediaId);
+  if (idx < 0) {
+    // Not in the computed list (e.g. url just became available); show it alone.
+    const url = resolveMediaUrl(mediaId);
+    if (!url) return;
+    gallery.items = [{ mediaId, messageId }];
+    idx = 0;
+  }
+  gallery.index = idx;
   els.lightbox.hidden = false;
+  showLightboxAt(idx);
+}
+
+function showLightboxAt(i) {
+  const items = gallery.items;
+  if (!items.length) return;
+  gallery.index = ((i % items.length) + items.length) % items.length;
+  const url = resolveMediaUrl(items[gallery.index].mediaId);
+  if (url) els.lightboxImg.src = url;
+  const multiple = items.length > 1;
+  if (els.lightboxCounter) {
+    els.lightboxCounter.hidden = !multiple;
+    els.lightboxCounter.textContent = multiple
+      ? `${gallery.index + 1} / ${items.length}`
+      : "";
+  }
+  if (els.lightboxPrev) els.lightboxPrev.hidden = !multiple;
+  if (els.lightboxNext) els.lightboxNext.hidden = !multiple;
+}
+
+function lightboxNext() {
+  showLightboxAt(gallery.index + 1);
+}
+
+function lightboxPrev() {
+  showLightboxAt(gallery.index - 1);
+}
+
+function isLightboxOpen() {
+  return els.lightbox && !els.lightbox.hidden;
 }
 
 function closeLightbox() {
   if (!els.lightbox || !els.lightboxImg) return;
   els.lightbox.hidden = true;
   els.lightboxImg.removeAttribute("src");
+  gallery = { items: [], index: 0 };
 }
 
 function setUploadStatus(text) {
@@ -2130,8 +2202,55 @@ els.attachInput?.addEventListener("change", () => {
   }
 });
 
-els.lightbox?.addEventListener("click", () => closeLightbox());
+els.lightbox?.addEventListener("click", (e) => {
+  // Close only when the dark backdrop itself is clicked (not the image/buttons).
+  if (e.target === els.lightbox) closeLightbox();
+});
+els.lightboxClose?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  closeLightbox();
+});
+els.lightboxPrev?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  lightboxPrev();
+});
+els.lightboxNext?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  lightboxNext();
+});
+els.lightboxImg?.addEventListener("click", (e) => e.stopPropagation());
+
+let lightboxTouchX = null;
+els.lightbox?.addEventListener(
+  "pointerdown",
+  (e) => {
+    lightboxTouchX = e.clientX;
+  },
+  { passive: true },
+);
+els.lightbox?.addEventListener("pointerup", (e) => {
+  if (lightboxTouchX === null) return;
+  const dx = e.clientX - lightboxTouchX;
+  lightboxTouchX = null;
+  if (Math.abs(dx) > 50 && gallery.items.length > 1) {
+    if (dx < 0) lightboxNext();
+    else lightboxPrev();
+  }
+});
+
 window.addEventListener("keydown", (e) => {
+  if (isLightboxOpen()) {
+    if (e.key === "ArrowRight") {
+      e.preventDefault();
+      lightboxNext();
+      return;
+    }
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      lightboxPrev();
+      return;
+    }
+  }
   if (e.key === "Escape") {
     closeLightbox();
     closeSidebarMenu();

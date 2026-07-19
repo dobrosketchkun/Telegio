@@ -30,11 +30,6 @@
           <p id="landing-join-hint" class="landing__hint" hidden></p>
           <button type="submit" class="btn btn--primary" id="landing-submit">Create session</button>
         </form>
-        <p class="landing__foot">
-          <a href="?fixture=1">Open fixture mode</a> (offline UI).
-          Online sessions discover peers over MQTT and Nostr; connected peers
-          can relay traffic when a direct path is unavailable.
-        </p>
       </div>
     </div>
 
@@ -126,13 +121,22 @@
               </svg>
             </button>
           </form>
-          <p class="compose-hint">*bold* _italic_ ~strike~ `code` ||spoiler|| · + photos (≤10) or one video/audio/file — media is P2P from the sender (≤10MB auto; larger = tap Download).</p>
         </div>
       </section>
     </div>
 
     <div class="lightbox" id="lightbox" hidden>
+      <button type="button" class="lightbox__close" id="lightbox-close" aria-label="Close">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+      <button type="button" class="lightbox__nav lightbox__nav--prev" id="lightbox-prev" aria-label="Previous image">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"/></svg>
+      </button>
       <img id="lightbox-img" alt="" />
+      <button type="button" class="lightbox__nav lightbox__nav--next" id="lightbox-next" aria-label="Next image">
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 6l6 6-6 6"/></svg>
+      </button>
+      <div class="lightbox__counter" id="lightbox-counter"></div>
     </div>
 
     <div id="modal" class="modal" hidden>
