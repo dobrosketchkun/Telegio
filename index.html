@@ -41,27 +41,51 @@
     <div id="app" class="app" hidden>
       <aside class="sidebar">
         <div class="sidebar__top">
-          <span class="sidebar__badge" id="mode-badge">Online</span>
-          <button type="button" class="sidebar__title" id="session-label" title="Session">Session</button>
+          <button type="button" class="icon-btn sidebar__menu-btn" id="menu-toggle" aria-label="Menu" title="Menu">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+              <path d="M3 6h18M3 12h18M3 18h18" />
+            </svg>
+          </button>
+          <div class="sidebar__titlewrap">
+            <span class="sidebar__badge" id="mode-badge">Online</span>
+            <button type="button" class="sidebar__title" id="session-label" title="Session">Session</button>
+          </div>
+          <button type="button" class="icon-btn sidebar__collapse-btn" id="collapse-toggle" aria-label="Collapse sidebar" title="Collapse sidebar">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M15 6l-6 6 6 6" />
+            </svg>
+          </button>
         </div>
+
+        <div class="sidebar__menu" id="sidebar-menu" hidden>
+          <button type="button" class="menu-item" id="btn-new-dm">New DM</button>
+          <button type="button" class="menu-item" id="btn-new-group">New group</button>
+          <button type="button" class="menu-item" id="btn-rename">Rename session</button>
+          <button type="button" class="menu-item" id="btn-admin" hidden>Kick member</button>
+          <div class="sidebar__invite" id="invite-box" hidden>
+            <label class="field field--compact">
+              <span>Invite link</span>
+              <div class="invite-row">
+                <input id="invite-url" readonly />
+                <button type="button" class="btn btn--small" id="invite-copy">Copy</button>
+              </div>
+            </label>
+          </div>
+          <button type="button" class="menu-item menu-item--danger" id="btn-end-session" hidden>End session</button>
+        </div>
+
+        <div class="sidebar__search">
+          <svg class="sidebar__search-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="7" />
+            <path d="M21 21l-4.3-4.3" />
+          </svg>
+          <input type="search" id="chat-search" placeholder="Search" autocomplete="off" />
+        </div>
+
         <div class="sidebar__status" id="conn-status">Connecting…</div>
-        <div class="sidebar__invite" id="invite-box" hidden>
-          <label class="field field--compact">
-            <span>Invite link</span>
-            <div class="invite-row">
-              <input id="invite-url" readonly />
-              <button type="button" class="btn btn--small" id="invite-copy">Copy</button>
-            </div>
-          </label>
-        </div>
-        <div class="sidebar__actions">
-          <button type="button" class="btn btn--small" id="btn-new-dm">New DM</button>
-          <button type="button" class="btn btn--small" id="btn-new-group">New group</button>
-          <button type="button" class="btn btn--small" id="btn-admin" hidden>Admin</button>
-          <button type="button" class="btn btn--small btn--danger" id="btn-end-session" hidden>End session</button>
-        </div>
         <p class="sidebar__hint" id="roster-hint" hidden>Waiting for people to join…</p>
         <ul class="chat-list" id="chat-list"></ul>
+        <div class="sidebar__resize" id="sidebar-resize" aria-hidden="true"></div>
       </aside>
 
       <section class="main">

@@ -33,6 +33,8 @@ import {
 import {
   isMuted,
   loadPrefs,
+  loadUiPrefs,
+  saveUiPrefs,
   toggleMuted,
   togglePinned,
 } from "../prefs.js";
@@ -75,7 +77,13 @@ const els = {
   btnNewDm: document.querySelector("#btn-new-dm"),
   btnNewGroup: document.querySelector("#btn-new-group"),
   btnAdmin: document.querySelector("#btn-admin"),
+  btnRename: document.querySelector("#btn-rename"),
   btnEndSession: document.querySelector("#btn-end-session"),
+  menuToggle: document.querySelector("#menu-toggle"),
+  sidebarMenu: document.querySelector("#sidebar-menu"),
+  collapseToggle: document.querySelector("#collapse-toggle"),
+  chatSearch: document.querySelector("#chat-search"),
+  sidebarResize: document.querySelector("#sidebar-resize"),
   rosterHint: document.querySelector("#roster-hint"),
   modal: document.querySelector("#modal"),
   modalTitle: document.querySelector("#modal-title"),
@@ -119,6 +127,8 @@ let replyToId = null;
 let editing = null;
 /** @type {{ known: Set<string>, at: number } | null} */
 let pendingGroupSelect = null;
+/** @type {string} */
+let chatFilter = "";
 /** @type {Record<string, number>} */
 const unread = Object.create(null);
 /** @type {Map<string, Set<string>>} */
@@ -355,9 +365,18 @@ function paint() {
     els.app.classList.toggle("app--chat-open", Boolean(activeChatId));
   }
 
+  const q = chatFilter.trim().toLowerCase();
+  const visibleChats = q
+    ? chats.filter(
+        (c) =>
+          (c.title || "").toLowerCase().includes(q) ||
+          (c.preview || "").toLowerCase().includes(q),
+      )
+    : chats;
+
   renderChatList(
     els.chatList,
-    chats,
+    visibleChats,
     activeChatId,
     unread,
     (id) => {
@@ -1024,6 +1043,87 @@ function togglePicker() {
   els.picker.hidden = !open;
   els.pickerToggle.classList.toggle("is-active", open);
   if (open) picker.render();
+}
+
+function closeSidebarMenu() {
+  if (els.sidebarMenu) els.sidebarMenu.hidden = true;
+  els.menuToggle?.classList.remove("is-active");
+}
+
+function toggleSidebarMenu() {
+  if (!els.sidebarMenu) return;
+  const open = els.sidebarMenu.hidden;
+  els.sidebarMenu.hidden = !open;
+  els.menuToggle?.classList.toggle("is-active", open);
+}
+
+/** @param {number} px */
+function clampSidebarWidth(px) {
+  return Math.max(240, Math.min(520, Math.round(px)));
+}
+
+/** @param {boolean} collapsed */
+function setRail(collapsed) {
+  els.app?.classList.toggle("app--rail", Boolean(collapsed));
+  const path = els.collapseToggle?.querySelector("path");
+  if (path) path.setAttribute("d", collapsed ? "M9 6l6 6-6 6" : "M15 6l-6 6 6 6");
+  if (els.collapseToggle) {
+    const label = collapsed ? "Expand sidebar" : "Collapse sidebar";
+    els.collapseToggle.title = label;
+    els.collapseToggle.setAttribute("aria-label", label);
+  }
+}
+
+function toggleRail() {
+  const collapsed = !els.app?.classList.contains("app--rail");
+  setRail(collapsed);
+  saveUiPrefs({ sidebarCollapsed: collapsed });
+  if (collapsed) closeSidebarMenu();
+}
+
+function applyUiPrefs() {
+  const ui = loadUiPrefs();
+  if (ui.sidebarWidth) {
+    document.documentElement.style.setProperty(
+      "--sidebar-width",
+      `${clampSidebarWidth(ui.sidebarWidth)}px`,
+    );
+  }
+  setRail(ui.sidebarCollapsed);
+}
+
+function initSidebarResize() {
+  const handle = els.sidebarResize;
+  if (!handle || !els.app) return;
+  let dragging = false;
+  const onMove = (e) => {
+    if (!dragging) return;
+    const left = els.app.getBoundingClientRect().left;
+    const width = clampSidebarWidth(e.clientX - left);
+    document.documentElement.style.setProperty("--sidebar-width", `${width}px`);
+  };
+  const onUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    document.body.classList.remove("is-resizing");
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    const w = parseInt(
+      getComputedStyle(document.documentElement).getPropertyValue(
+        "--sidebar-width",
+      ),
+      10,
+    );
+    if (Number.isFinite(w)) saveUiPrefs({ sidebarWidth: w });
+  };
+  handle.addEventListener("pointerdown", (e) => {
+    if (els.app.classList.contains("app--rail")) return; // no resize while railed
+    dragging = true;
+    document.body.classList.add("is-resizing");
+    e.preventDefault();
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  });
 }
 
 function persistResume() {
@@ -1870,8 +1970,14 @@ els.attachInput?.addEventListener("change", () => {
 
 els.lightbox?.addEventListener("click", () => closeLightbox());
 window.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closeLightbox();
+  if (e.key === "Escape") {
+    closeLightbox();
+    closeSidebarMenu();
+  }
 });
+
+applyUiPrefs();
+initSidebarResize();
 
 els.messages?.addEventListener("scroll", updateJumpFab);
 els.jumpFab?.addEventListener("click", () => {
@@ -1896,6 +2002,32 @@ els.inviteCopy?.addEventListener("click", async () => {
   }
 });
 
+els.menuToggle?.addEventListener("click", (e) => {
+  e.stopPropagation();
+  toggleSidebarMenu();
+});
+els.collapseToggle?.addEventListener("click", toggleRail);
+els.btnRename?.addEventListener("click", () => {
+  closeSidebarMenu();
+  renameSessionPrompt();
+});
+els.chatSearch?.addEventListener("input", () => {
+  chatFilter = els.chatSearch.value || "";
+  paint();
+});
+els.sidebarMenu?.addEventListener("click", (e) => {
+  if (e.target.closest(".menu-item")) closeSidebarMenu();
+});
+document.addEventListener("click", (e) => {
+  if (
+    els.sidebarMenu &&
+    !els.sidebarMenu.hidden &&
+    !els.sidebarMenu.contains(e.target) &&
+    !els.menuToggle?.contains(e.target)
+  ) {
+    closeSidebarMenu();
+  }
+});
 els.btnNewDm?.addEventListener("click", openNewDmModal);
 els.btnNewGroup?.addEventListener("click", openNewGroupModal);
 els.btnAdmin?.addEventListener("click", openAdminModal);

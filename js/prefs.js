@@ -84,3 +84,42 @@ export function isPinned(sessionId, chatId) {
 export function isMuted(sessionId, chatId) {
   return loadPrefs(sessionId).mutedChatIds.includes(chatId);
 }
+
+/**
+ * Global (not per-session) UI layout prefs: sidebar width + collapsed rail.
+ * @returns {{ sidebarWidth: number | null, sidebarCollapsed: boolean }}
+ */
+export function loadUiPrefs() {
+  const empty = { sidebarWidth: null, sidebarCollapsed: false };
+  try {
+    const raw = localStorage.getItem("ephchat.ui");
+    if (!raw) return empty;
+    const parsed = JSON.parse(raw);
+    const w = Number(parsed.sidebarWidth);
+    return {
+      sidebarWidth: Number.isFinite(w) && w > 0 ? w : null,
+      sidebarCollapsed: Boolean(parsed.sidebarCollapsed),
+    };
+  } catch {
+    return empty;
+  }
+}
+
+/**
+ * @param {{ sidebarWidth?: number | null, sidebarCollapsed?: boolean }} patch
+ */
+export function saveUiPrefs(patch) {
+  try {
+    const current = loadUiPrefs();
+    const next = { ...current, ...patch };
+    localStorage.setItem(
+      "ephchat.ui",
+      JSON.stringify({
+        sidebarWidth: next.sidebarWidth ?? null,
+        sidebarCollapsed: Boolean(next.sidebarCollapsed),
+      }),
+    );
+  } catch {
+    /* quota */
+  }
+}
