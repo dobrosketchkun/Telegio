@@ -125,6 +125,20 @@ export class MultipathRoom {
     return { mqtt, nostr, indirect };
   }
 
+  /**
+   * Aggregate logical reachability across direct MQTT/Nostr paths and recently
+   * observed relayed packets.
+   * @param {string} logicalId
+   */
+  isPeerReachable(logicalId) {
+    const peer = this._logicalPeers.get(logicalId);
+    return Boolean(
+      peer &&
+        (peer.directPaths.size > 0 ||
+          Date.now() - peer.lastSeen <= PEER_STALE_MS),
+    );
+  }
+
   leave() {
     if (this._closed) return;
     this._closed = true;

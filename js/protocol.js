@@ -1,5 +1,12 @@
 import { ENVELOPE_V } from "./constants.js";
 
+export const ROOM_CONTROL_TYPES = new Set([
+  "room-presence",
+  "host-claim",
+  "state-handoff-request",
+  "state-handoff",
+]);
+
 /**
  * @typedef {"none" | "signed" | "sealed" | "sealed+signed"} CryptoMode
  *
@@ -34,6 +41,22 @@ export function encodeFrame(type, body = {}) {
     crypto: { mode: "none" },
     body,
   };
+}
+
+/**
+ * Permanent-room control packets are signed by MultipathRoom's logical source
+ * identity. This inner frame remains plaintext so it can use the normal chat
+ * action while its outer packet authenticates the sender.
+ */
+export function encodeRoomControlFrame(type, body = {}) {
+  if (!ROOM_CONTROL_TYPES.has(type)) {
+    throw new Error(`Unknown room control frame: ${type}`);
+  }
+  return encodeFrame(type, body);
+}
+
+export function isRoomControlFrame(type) {
+  return ROOM_CONTROL_TYPES.has(type);
 }
 
 /**

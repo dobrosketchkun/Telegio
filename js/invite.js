@@ -28,6 +28,23 @@ export function readJoinHostPeerId() {
   return new URLSearchParams(location.search).get("host")?.trim() || null;
 }
 
+/** @returns {string | null} */
+export function readPermanentRoomId() {
+  return new URLSearchParams(location.search).get("room")?.trim() || null;
+}
+
+/**
+ * @param {string} roomId
+ * @param {string} [baseHref]
+ */
+export function mintPermanentRoomUrl(roomId, baseHref = location.href) {
+  const url = new URL(baseHref);
+  url.search = "";
+  url.hash = "";
+  url.searchParams.set("room", roomId);
+  return url.toString();
+}
+
 /** @returns {boolean} */
 export function isFixtureMode() {
   return new URLSearchParams(location.search).get("fixture") === "1";

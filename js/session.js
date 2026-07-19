@@ -11,15 +11,22 @@ import {
   applyDm,
   applyHost,
   applyHostEvent,
+  bumpHostRevision,
   createEmptyDmState,
   createHostState,
   fanoutPeerIdsForGroup,
   filterHostStateForPeer,
   getHostPeerId,
+  mergeHostSnapshots,
   removeRosterPeer,
 } from "./engine.js";
-import { makeSessionId, dmIdFor } from "./ids.js";
-import { mintInviteUrl } from "./invite.js";
+import {
+  makeSessionId,
+  dmIdFor,
+  normalizePermanentRoomId,
+  permanentSessionId,
+} from "./ids.js";
+import { mintInviteUrl, mintPermanentRoomUrl } from "./invite.js";
 import { error as logError, log, warn } from "./log.js";
 import {
   blobFromBase64Chunks,
@@ -28,15 +35,26 @@ import {
   compressImage,
   formatBytes,
   isDeferredPlayableSize,
-  isGatedPlayableMime,
+  isDeferredTransferMime,
   mediaChunkCount,
   mintMediaId,
   prepareAudio,
   prepareFile,
   prepareVideo,
 } from "./media.js";
-import { decodeFrame, encodeFrame } from "./protocol.js";
+import {
+  decodeFrame,
+  encodeFrame,
+  encodeRoomControlFrame,
+  isRoomControlFrame,
+} from "./protocol.js";
 import { remapHostPeer } from "./resume.js";
+import {
+  canRestorePermanentRoom,
+  compareHostClaims,
+  HOST_GRACE_MS,
+  pickElectionWinner,
+} from "./rooms.js";
 import { loadTrystero, roomConfig } from "./trystero.js";
 
 /**
@@ -72,7 +90,7 @@ export class ChatSession {
    */
   constructor(hooks) {
     this.hooks = hooks;
-    /** @type {"host" | "guest" | null} */
+    /** @type {"host" | "guest" | "candidate" | null} */
     this.role = null;
     /** @type {string} */
     this.selfPeerId = "";
@@ -111,6 +129,18 @@ export class ChatSession {
     this._mediaUnlocked = new Set();
     /** @type {ReturnType<typeof setTimeout> | null} */
     this._hostGraceTimer = null;
+    this.roomMode = "random";
+    this.permanentRoomId = "";
+    this.electionTerm = 0;
+    this.leaseExpiry = 0;
+    this._candidateIds = new Set();
+    this._hostClaimTimer = null;
+    this._hostLeaseTimer = null;
+    this._electionTimer = null;
+    this._stateOffers = new Map();
+    this._electionEpoch = 0;
+    this._continuing = false;
+    this._permanentHostMissing = false;
   }
 
   /**
@@ -145,7 +175,7 @@ export class ChatSession {
         "",
     ).toLowerCase();
     const large =
-      isGatedPlayableMime(mime) && isDeferredPlayableSize(size);
+      isDeferredTransferMime(mime) && isDeferredPlayableSize(size);
     if (large && !gate.outgoing && !this._mediaUnlocked.has(mediaId)) {
       return null;
     }
@@ -283,6 +313,58 @@ export class ChatSession {
   }
 
   /**
+   * Join a reusable host-independent room, discover its host, or take part in
+   * deterministic election when no valid host claim is reachable.
+   * @param {{ displayName: string, roomId: string, resume?: object }} opts
+   */
+  async enterPermanentRoom(opts) {
+    const displayName = String(opts.displayName || "").trim() || "Member";
+    const roomId = normalizePermanentRoomId(opts.roomId);
+    const sessionId = await permanentSessionId(roomId);
+    this.roomMode = "permanent";
+    this.permanentRoomId = roomId;
+    this._sessionId = sessionId;
+    this._pendingDisplayName = displayName;
+    this.inviteUrl = mintPermanentRoomUrl(roomId);
+    this.role = "candidate";
+    const canRestore = canRestorePermanentRoom(opts.resume, roomId);
+    this.dmState = canRestore
+      ? opts.resume?.dmState || createEmptyDmState()
+      : createEmptyDmState();
+    this.electionTerm = canRestore
+      ? Number(opts.resume?.electionTerm) || 0
+      : 0;
+    this.hooks.onStatus("Looking for room");
+
+    const { joinRoom, selfId } = await loadTrystero(sessionId);
+    this.selfPeerId = selfId;
+    this._candidateIds = new Set([selfId]);
+    if (
+      canRestore &&
+      opts.resume?.hostState
+    ) {
+      this.hostState = opts.resume.hostState;
+    }
+    await this._joinRoom(joinRoom, sessionId);
+    if (
+      canRestore &&
+      opts.resume?.role === "host" &&
+      this.hostState &&
+      Number(opts.resume.leaseExpiry) > Date.now()
+    ) {
+      this.role = "host";
+      this._startHostClaims();
+      this._sendHostClaim();
+      this.hooks.onStatus(this._statusLabel());
+      return this;
+    }
+    this._sendRoomPresence();
+    this._scheduleElection(3_000);
+    this.hooks.onChange();
+    return this;
+  }
+
+  /**
    * @param {{ endSession?: boolean }} [opts]
    *   endSession=false skips broadcasting session-ended (used on refresh when resuming).
    */
@@ -291,6 +373,7 @@ export class ChatSession {
     this._stopHelloRetry();
     this._stopDiag();
     this._clearHostGrace();
+    this._clearElectionTimers();
     if (
       endSession &&
       this.role === "host" &&
@@ -325,7 +408,6 @@ export class ChatSession {
         this._pendingDisplayName ||
         "User",
       title: this.hostState?.session?.title,
-      hostState: this.role === "host" ? this.hostState : undefined,
       dmState: this.dmState,
       previousHostPeerId:
         this.role === "host" ? this.selfPeerId : undefined,
@@ -334,6 +416,16 @@ export class ChatSession {
         this.role === "guest"
           ? this._hostHint || (this.hostState && getHostPeerId(this.hostState))
           : this.selfPeerId,
+      roomMode: this.roomMode,
+      permanentRoomId: this.permanentRoomId || undefined,
+      electionTerm:
+        this.roomMode === "permanent" ? this.electionTerm : undefined,
+      leaseExpiry:
+        this.roomMode === "permanent" ? this.leaseExpiry : undefined,
+      hostState:
+        this.role === "host" || this.roomMode === "permanent"
+          ? this.hostState
+          : undefined,
     };
   }
 
@@ -350,7 +442,7 @@ export class ChatSession {
         this.hooks.onError(result.error);
         return;
       }
-      this.hostState = result.state;
+      this.hostState = bumpHostRevision(result.state, action);
       this._emitEffects(result.effects, /* skipSelf */ true);
       this._ackFromEffects(result.effects);
       if (action.type === "admin-kick" && action.peerId) {
@@ -768,7 +860,7 @@ export class ChatSession {
       const senderPeerId =
         opts.senders?.[id] || meta?.senderPeerId || undefined;
       const largeLocked =
-        isGatedPlayableMime(mime) &&
+        isDeferredTransferMime(mime) &&
         isDeferredPlayableSize(knownSize) &&
         !opts.force &&
         !this._mediaUnlocked.has(id);
@@ -1087,6 +1179,10 @@ export class ChatSession {
           }
         }, 800);
       }
+      if (this.role === "candidate") {
+        this._candidateIds.add(peerId);
+        this._sendRoomPresence(peerId);
+      }
       if (
         this.role === "guest" &&
         (!this.hostState || this._hostGraceTimer)
@@ -1104,6 +1200,7 @@ export class ChatSession {
     room.onPeerLeave = (peerId) => {
       log("peer", "leave", peerId);
       this.connectedPeers.delete(peerId);
+      this._candidateIds.delete(peerId);
       this._awaitingHello.delete(peerId);
       if (this.role === "host" && this.hostState) {
         const leaving = this.hostState.roster.find((r) => r.peerId === peerId);
@@ -1112,6 +1209,7 @@ export class ChatSession {
           .filter((g) => g.memberPeerIds.includes(peerId))
           .map((g) => g.id);
         this.hostState = removeRosterPeer(this.hostState, peerId);
+        let leaveEffects = [];
         if (groupIds.length) {
           const sys = appendSystemToGroups(
             this.hostState,
@@ -1119,16 +1217,23 @@ export class ChatSession {
             groupIds,
           );
           this.hostState = sys.state;
-          this._emitEffects(sys.effects, false);
+          leaveEffects = sys.effects;
         }
+        this.hostState = bumpHostRevision(this.hostState);
+        this._emitEffects(leaveEffects, false);
         this._broadcastRoster();
         this.hooks.onChange();
       }
       if (this.role === "guest" && this.hostState) {
-        const hostId = getHostPeerId(this.hostState);
+        const hostId = this._hostHint || getHostPeerId(this.hostState);
         if (peerId === hostId) {
-          // Host may be refreshing — wait briefly before ending.
-          this._startHostGrace();
+          if (this.roomMode === "permanent") {
+            this._permanentHostMissing = true;
+            this.hooks.onStatus("Host reconnecting (30s)");
+          } else {
+            // Random-session host may be refreshing — wait briefly before ending.
+            this._startHostGrace();
+          }
         }
       }
       this.hooks.onStatus(this._statusLabel());
@@ -1136,6 +1241,14 @@ export class ChatSession {
     };
 
     room.onPathChange = () => {
+      if (
+        this.roomMode === "permanent" &&
+        this.role === "guest" &&
+        this._hostHint
+      ) {
+        this._permanentHostMissing =
+          !room.isPeerReachable?.(this._hostHint);
+      }
       this.hooks.onStatus(this._statusLabel());
       this.hooks.onChange();
     };
@@ -1162,6 +1275,268 @@ export class ChatSession {
     }, 20_000);
   }
 
+  _clearElectionTimers() {
+    clearTimeout(this._electionTimer);
+    clearTimeout(this._hostLeaseTimer);
+    clearInterval(this._hostClaimTimer);
+    this._electionTimer = null;
+    this._hostLeaseTimer = null;
+    this._hostClaimTimer = null;
+  }
+
+  _sendRoomPresence(target) {
+    if (this.roomMode !== "permanent" || !this._chat) return;
+    this._send(
+      encodeRoomControlFrame("room-presence", {
+        roomId: this.permanentRoomId,
+        candidateId: this.selfPeerId,
+        term: this.electionTerm,
+        hostId: this.role === "host" ? this.selfPeerId : this._hostHint || "",
+        role: this.role,
+      }),
+      target,
+    );
+  }
+
+  _scheduleElection(delay = 3_000, replacement = false) {
+    clearTimeout(this._electionTimer);
+    const epoch = ++this._electionEpoch;
+    this.hooks.onStatus(replacement ? "Electing host" : "Looking for room");
+    this._electionTimer = setTimeout(() => {
+      if (epoch !== this._electionEpoch || this.role !== "candidate") return;
+      this._runElection(replacement);
+    }, delay);
+  }
+
+  _runElection(replacement) {
+    if (this.role !== "candidate") return;
+    if (replacement) this.electionTerm += 1;
+    else this.electionTerm = Math.max(1, this.electionTerm);
+    this._candidateIds.add(this.selfPeerId);
+    const winner = pickElectionWinner(this._candidateIds);
+    this.hooks.onStatus("Electing host");
+    if (winner === this.selfPeerId) {
+      this._becomePermanentHost(replacement || Boolean(this.hostState));
+      return;
+    }
+    // The deterministic winner should claim shortly; retry if it vanished.
+    this._scheduleElection(2_500, false);
+  }
+
+  _becomePermanentHost(reconstruct) {
+    this.role = "host";
+    this._hostHint = this.selfPeerId;
+    this._candidateIds.clear();
+    this._permanentHostMissing = false;
+    clearTimeout(this._electionTimer);
+    clearTimeout(this._hostLeaseTimer);
+    this._electionTimer = null;
+    this._hostLeaseTimer = null;
+    this.ended = false;
+
+    if (!reconstruct) {
+      this.hostState = createHostState({
+        sessionId: this._sessionId,
+        title: this.permanentRoomId,
+        hostPeer: {
+          peerId: this.selfPeerId,
+          displayName: this._pendingDisplayName || "Host",
+          role: "host",
+          joinedAt: Date.now(),
+          colorIndex: 0,
+        },
+      });
+      this.hostState.meta = {
+        ...(this.hostState.meta || {}),
+        revision: 0,
+        groupRevisions: {},
+      };
+      this._continuing = false;
+      this._startHostClaims();
+      this._sendHostClaim();
+      this.hooks.onStatus(this._statusLabel());
+      this.hooks.onChange();
+      return;
+    }
+
+    this._continuing = true;
+    this._stateOffers = new Map();
+    if (this.hostState) this._stateOffers.set(this.selfPeerId, this.hostState);
+    this._startHostClaims();
+    this._sendHostClaim();
+    this._send(
+      encodeRoomControlFrame("state-handoff-request", {
+        term: this.electionTerm,
+        hostId: this.selfPeerId,
+      }),
+    );
+    this.hooks.onStatus("Continuing with new host");
+    setTimeout(() => this._finishStateHandoff(), 1_500);
+  }
+
+  _finishStateHandoff() {
+    if (this.role !== "host" || !this._continuing) return;
+    this.hostState = mergeHostSnapshots([...this._stateOffers.values()], {
+      sessionId: this._sessionId,
+      title: this.permanentRoomId,
+      hostPeerId: this.selfPeerId,
+      hostDisplayName: this._pendingDisplayName || "Host",
+      activePeerIds: [...this._stateOffers.keys()],
+    });
+    this._continuing = false;
+    this._broadcastRoster();
+    for (const peerId of this.connectedPeers) {
+      this._send(encodeFrame("hello-request", {}), peerId);
+    }
+    this.hooks.onStatus(this._statusLabel());
+    this.hooks.onChange();
+  }
+
+  _startHostClaims() {
+    clearInterval(this._hostClaimTimer);
+    this._hostClaimTimer = setInterval(() => this._sendHostClaim(), 7_000);
+    this.leaseExpiry = Date.now() + HOST_GRACE_MS;
+  }
+
+  _sendHostClaim(target) {
+    if (this.roomMode !== "permanent" || this.role !== "host") return;
+    this.leaseExpiry = Date.now() + HOST_GRACE_MS;
+    this._send(
+      encodeRoomControlFrame("host-claim", {
+        roomId: this.permanentRoomId,
+        hostId: this.selfPeerId,
+        term: this.electionTerm,
+        leaseExpiry: this.leaseExpiry,
+        revision: Number(this.hostState?.meta?.revision) || 0,
+      }),
+      target,
+    );
+    if (!target) this.hooks.onChange();
+  }
+
+  _acceptHostClaim(hostId, term) {
+    const previousHost =
+      this._hostHint || (this.hostState ? getHostPeerId(this.hostState) : "");
+    const wasHost = this.role === "host";
+    if (wasHost && hostId !== this.selfPeerId && this.hostState) {
+      this._send(
+        encodeRoomControlFrame("state-handoff", {
+          term,
+          from: this.selfPeerId,
+          state: this.hostState,
+        }),
+        hostId,
+      );
+    }
+    if (wasHost) clearInterval(this._hostClaimTimer);
+    this.role = "guest";
+    this.electionTerm = term;
+    this._hostHint = hostId;
+    this._permanentHostMissing = false;
+    this._continuing = false;
+    clearTimeout(this._electionTimer);
+    this._candidateIds.clear();
+    this._scheduleHostLease();
+    if (previousHost !== hostId || !this.hostState) {
+      this._sendHello(hostId);
+      this._startHelloRetry();
+    }
+    this.hooks.onStatus(this._statusLabel());
+    this.hooks.onChange();
+  }
+
+  _scheduleHostLease() {
+    clearTimeout(this._hostLeaseTimer);
+    this.leaseExpiry = Date.now() + HOST_GRACE_MS;
+    this._hostLeaseTimer = setTimeout(() => {
+      if (this.roomMode !== "permanent" || this.role !== "guest") return;
+      this.role = "candidate";
+      this._permanentHostMissing = true;
+      this._candidateIds = new Set([this.selfPeerId, ...this.connectedPeers]);
+      this._scheduleElection(250, true);
+      this.hooks.onChange();
+    }, HOST_GRACE_MS);
+  }
+
+  _onElectionFrame(type, body, peerId) {
+    if (this.roomMode !== "permanent") return false;
+    if (type === "room-presence") {
+      if (body.roomId !== this.permanentRoomId) return true;
+      this._candidateIds.add(peerId);
+      if (this.role === "host") this._sendHostClaim(peerId);
+      else if (body.role === "host" && body.hostId === peerId) {
+        this._sendRoomPresence(peerId);
+      }
+      return true;
+    }
+
+    if (type === "host-claim") {
+      const term = Number(body.term);
+      const hostId = String(body.hostId || "");
+      if (
+        body.roomId !== this.permanentRoomId ||
+        hostId !== peerId ||
+        !Number.isInteger(term) ||
+        term < 1
+      ) {
+        return true;
+      }
+      const currentHost =
+        this.role === "host" ? this.selfPeerId : this._hostHint || "";
+      const superior =
+        compareHostClaims(
+          { term, hostId },
+          { term: this.electionTerm, hostId: currentHost },
+        ) > 0;
+      if (hostId === currentHost && term === this.electionTerm) {
+        if (this.role === "guest") {
+          this._permanentHostMissing = false;
+          this._scheduleHostLease();
+          this.hooks.onChange();
+        }
+        return true;
+      }
+      if (superior) {
+        this._acceptHostClaim(hostId, term);
+      } else if (this.role === "host") {
+        this._sendHostClaim(peerId);
+      }
+      return true;
+    }
+
+    if (type === "state-handoff-request") {
+      if (
+        body.hostId === peerId &&
+        Number(body.term) >= this.electionTerm &&
+        this.hostState
+      ) {
+        this._send(
+          encodeRoomControlFrame("state-handoff", {
+            term: Number(body.term),
+            from: this.selfPeerId,
+            state: this.hostState,
+          }),
+          peerId,
+        );
+      }
+      return true;
+    }
+
+    if (type === "state-handoff") {
+      if (
+        this.role === "host" &&
+        this._continuing &&
+        Number(body.term) === this.electionTerm &&
+        body.from === peerId &&
+        body.state
+      ) {
+        this._stateOffers.set(peerId, body.state);
+      }
+      return true;
+    }
+    return false;
+  }
+
   /**
    * @param {unknown} data
    * @param {string} peerId
@@ -1173,6 +1548,13 @@ export class ChatSession {
       ({ type, body } = decodeFrame(data));
     } catch (e) {
       console.warn("Bad frame", e);
+      return;
+    }
+
+    if (
+      isRoomControlFrame(type) &&
+      this._onElectionFrame(type, body, peerId)
+    ) {
       return;
     }
 
@@ -1232,6 +1614,7 @@ export class ChatSession {
           ),
         };
       }
+      this.hostState = bumpHostRevision(this.hostState);
       const filtered = filterHostStateForPeer(this.hostState, peerId);
       log("host", "welcome →", peerId, {
         title: this.hostState.session?.title,
@@ -1261,7 +1644,7 @@ export class ChatSession {
         this._send(encodeFrame("error", { message: result.error }), peerId);
         return;
       }
-      this.hostState = result.state;
+      this.hostState = bumpHostRevision(result.state, action);
       this._emitEffects(result.effects, false);
       this._ackFromEffects(result.effects);
       if (action.type === "admin-kick" && action.peerId) {
@@ -1333,6 +1716,7 @@ export class ChatSession {
         return;
       }
       this._clearHostGrace();
+      if (this.roomMode === "permanent") this._scheduleHostLease();
       this.ended = false;
       this.hostState = state;
       // Ensure roster from welcome body if fuller
@@ -1745,7 +2129,9 @@ export class ChatSession {
         { actorPeerId: this.selfPeerId },
       );
       if (result.ok && result.effects.length) {
-        this.hostState = result.state;
+        this.hostState = bumpHostRevision(result.state, {
+          chatId,
+        });
         this._emitEffects(result.effects, false);
       }
       return;
@@ -1773,13 +2159,20 @@ export class ChatSession {
     if (!this.hostState) return;
     const hostId = getHostPeerId(this.hostState);
     for (const effect of effects) {
+      const versionedEffect = {
+        ...effect,
+        revision: Number(this.hostState.meta?.revision) || 0,
+        groupRevision: effect.chatId
+          ? Number(this.hostState.meta?.groupRevisions?.[effect.chatId]) || 0
+          : undefined,
+      };
       if (effect.event === "session-ended") continue;
       // peer-kicked is sent as a dedicated frame to the kickee; roster broadcast separate.
       if (effect.event === "peer-kicked") {
         const wireTargets = [...this.connectedPeers].filter(
           (id) => id && id !== this.selfPeerId && id !== effect.peerId,
         );
-        this._sendToPeers(encodeFrame("event", effect), wireTargets);
+        this._sendToPeers(encodeFrame("event", versionedEffect), wireTargets);
         continue;
       }
 
@@ -1800,7 +2193,7 @@ export class ChatSession {
       const wireTargets = [...new Set(targets)].filter(
         (id) => id && id !== this.selfPeerId,
       );
-      this._sendToPeers(encodeFrame("event", effect), wireTargets);
+      this._sendToPeers(encodeFrame("event", versionedEffect), wireTargets);
     }
   }
 
@@ -2003,7 +2396,8 @@ export class ChatSession {
       this.putLocalMedia(mediaId, entry);
       this._fetching.delete(mediaId);
       const largeGated =
-        isGatedPlayableMime(entry.mime) && isDeferredPlayableSize(entry.size);
+        isDeferredTransferMime(entry.mime) &&
+        isDeferredPlayableSize(entry.size);
       if (!largeGated) this.unlockMedia(mediaId);
 
       this._incoming.delete(mediaId);
@@ -2239,6 +2633,13 @@ export class ChatSession {
 
   _statusLabel() {
     if (this.sessionEnded) return "Session ended";
+    if (this._continuing) return "Continuing with new host";
+    if (this.roomMode === "permanent" && this.role === "candidate") {
+      return this._permanentHostMissing ? "Electing host" : "Looking for room";
+    }
+    if (this.roomMode === "permanent" && this._permanentHostMissing) {
+      return "Host reconnecting (30s)";
+    }
     if (this._hostGraceTimer) return "Host reconnecting…";
     if (this.role === "guest" && !this.hostState) {
       if (this.connectedPeers.size === 0) {

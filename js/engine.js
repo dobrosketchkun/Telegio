@@ -56,7 +56,7 @@ export function createHostState({ sessionId, title, hostPeer }) {
     roster: [hostPeer],
     groups: {},
     groupMessages: {},
-    meta: {},
+    meta: { revision: 0, groupRevisions: {} },
   };
 }
 
@@ -660,6 +660,27 @@ export function applyHost(state, action, ctx) {
  */
 export function applyHostEvent(state, body) {
   const next = clone(state);
+  if (Number.isFinite(Number(body.revision))) {
+    next.meta = {
+      ...(next.meta || {}),
+      revision: Math.max(
+        Number(next.meta?.revision) || 0,
+        Number(body.revision),
+      ),
+    };
+  }
+  if (body.chatId && Number.isFinite(Number(body.groupRevision))) {
+    next.meta = {
+      ...(next.meta || {}),
+      groupRevisions: {
+        ...(next.meta?.groupRevisions || {}),
+        [body.chatId]: Math.max(
+          Number(next.meta?.groupRevisions?.[body.chatId]) || 0,
+          Number(body.groupRevision),
+        ),
+      },
+    };
+  }
   const event = body.event;
   switch (event) {
     case "chat-created": {
@@ -1314,6 +1335,172 @@ export function fanoutPeerIdsForGroup(state, chatId) {
   const set = new Set(chat?.memberPeerIds || []);
   if (hostId) set.add(hostId);
   return [...set];
+}
+
+/**
+ * Increment authoritative revisions after a successful host mutation.
+ * @param {HostState} state
+ * @param {{ chatId?: string }} action
+ */
+export function bumpHostRevision(state, action = {}) {
+  const next = clone(state);
+  const revision = (Number(next.meta?.revision) || 0) + 1;
+  const groupRevisions = { ...(next.meta?.groupRevisions || {}) };
+  if (action.chatId) {
+    groupRevisions[action.chatId] =
+      (Number(groupRevisions[action.chatId]) || 0) + 1;
+  }
+  next.meta = { ...(next.meta || {}), revision, groupRevisions };
+  return next;
+}
+
+/**
+ * Reconstruct authoritative state from the visible replicas held by reachable
+ * participants after a permanent-room host election.
+ * @param {HostState[]} snapshots
+ * @param {{ sessionId: string, title: string, hostPeerId: string, hostDisplayName: string, activePeerIds?: string[] }} opts
+ */
+export function mergeHostSnapshots(snapshots, opts) {
+  const valid = (snapshots || []).filter(
+    (state) => state?.session && state?.groups && state?.groupMessages,
+  );
+  let next = valid.length
+    ? clone(
+        [...valid].sort(
+          (a, b) =>
+            (Number(b.meta?.revision) || 0) -
+            (Number(a.meta?.revision) || 0),
+        )[0],
+      )
+    : createHostState({
+        sessionId: opts.sessionId,
+        title: opts.title,
+        hostPeer: {
+          peerId: opts.hostPeerId,
+          displayName: opts.hostDisplayName,
+          role: "host",
+          joinedAt: Date.now(),
+          colorIndex: 0,
+        },
+      });
+
+  const roster = new Map();
+  const groups = {};
+  const messages = {};
+  let maxRevision = Number(next.meta?.revision) || 0;
+  const groupRevisions = {};
+
+  for (const state of valid) {
+    maxRevision = Math.max(maxRevision, Number(state.meta?.revision) || 0);
+    for (const entry of state.roster || []) {
+      roster.set(entry.peerId, {
+        ...(roster.get(entry.peerId) || {}),
+        ...entry,
+        role: "member",
+      });
+    }
+    for (const [chatId, chat] of Object.entries(state.groups || {})) {
+      groups[chatId] = mergeChat(groups[chatId], chat);
+      groupRevisions[chatId] = Math.max(
+        Number(groupRevisions[chatId]) || 0,
+        Number(state.meta?.groupRevisions?.[chatId]) || 0,
+      );
+      const byId = new Map((messages[chatId] || []).map((m) => [m.id, m]));
+      for (const message of state.groupMessages?.[chatId] || []) {
+        const previous = byId.get(message.id);
+        byId.set(message.id, mergeMessage(previous, message));
+      }
+      messages[chatId] = [...byId.values()].sort(
+        (a, b) => Number(a.createdAt) - Number(b.createdAt),
+      );
+    }
+  }
+
+  roster.set(opts.hostPeerId, {
+    ...(roster.get(opts.hostPeerId) || {}),
+    peerId: opts.hostPeerId,
+    displayName: opts.hostDisplayName || "Host",
+    role: "host",
+    joinedAt: roster.get(opts.hostPeerId)?.joinedAt || Date.now(),
+    colorIndex: roster.get(opts.hostPeerId)?.colorIndex ?? 0,
+  });
+  if (opts.activePeerIds?.length) {
+    const active = new Set([...opts.activePeerIds, opts.hostPeerId]);
+    for (const peerId of roster.keys()) {
+      if (!active.has(peerId)) roster.delete(peerId);
+    }
+    for (const chat of Object.values(groups)) {
+      chat.memberPeerIds = (chat.memberPeerIds || []).filter((peerId) =>
+        active.has(peerId),
+      );
+    }
+  }
+
+  next = {
+    ...next,
+    session: {
+      ...next.session,
+      id: opts.sessionId,
+      title: next.session?.title || opts.title || "Room",
+      ended: false,
+    },
+    roster: [...roster.values()].map((entry) => ({
+      ...entry,
+      role: entry.peerId === opts.hostPeerId ? "host" : "member",
+    })),
+    groups,
+    groupMessages: messages,
+    meta: {
+      ...(next.meta || {}),
+      revision: maxRevision + 1,
+      groupRevisions,
+    },
+  };
+  return next;
+}
+
+function mergeChat(previous, incoming) {
+  if (!previous) return clone(incoming);
+  return {
+    ...previous,
+    ...incoming,
+    memberPeerIds: uniqueStrings([
+      ...(previous.memberPeerIds || []),
+      ...(incoming.memberPeerIds || []),
+    ]),
+  };
+}
+
+function mergeMessage(previous, incoming) {
+  if (!previous) return clone(incoming);
+  const newer =
+    Number(incoming.editedAt || incoming.createdAt) >=
+    Number(previous.editedAt || previous.createdAt)
+      ? incoming
+      : previous;
+  const reactionMap = new Map();
+  for (const reaction of [
+    ...(previous.reactions || []),
+    ...(incoming.reactions || []),
+  ]) {
+    reactionMap.set(reaction.emoji, {
+      emoji: reaction.emoji,
+      peerIds: uniqueStrings([
+        ...(reactionMap.get(reaction.emoji)?.peerIds || []),
+        ...(reaction.peerIds || []),
+      ]),
+    });
+  }
+  return {
+    ...newer,
+    reactions: reactionMap.size ? [...reactionMap.values()] : newer.reactions,
+    delivery: {
+      ackedBy: uniqueStrings([
+        ...(previous.delivery?.ackedBy || []),
+        ...(incoming.delivery?.ackedBy || []),
+      ]),
+    },
+  };
 }
 
 /** @param {Message | undefined} last */

@@ -12,9 +12,6 @@ export function isDeferredPlayableSize(size) {
   return Number(size) > VIDEO_AUTO_DOWNLOAD_BYTES;
 }
 
-/** @deprecated use isDeferredPlayableSize */
-export const isDeferredVideoSize = isDeferredPlayableSize;
-
 /**
  * Non-image mimes use the ~10MB auto-fetch / unlock gate (video, audio, documents).
  * Images always auto-fetch.
@@ -24,9 +21,6 @@ export function isDeferredTransferMime(mime) {
   if (!m || m.startsWith("image/")) return false;
   return true;
 }
-
-/** @deprecated use isDeferredTransferMime */
-export const isGatedPlayableMime = isDeferredTransferMime;
 
 /**
  * @typedef {{

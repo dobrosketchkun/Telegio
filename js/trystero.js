@@ -81,12 +81,6 @@ export async function loadTrystero(sessionId) {
   return { joinRoom, selfId: identity.peerId };
 }
 
-/** @deprecated use loadTrystero */
-export async function loadJoinRoom(sessionId) {
-  const { joinRoom } = await loadTrystero(sessionId);
-  return joinRoom;
-}
-
 /** @returns {{ appId: string, rtcConfig: { iceServers: object[] }, turnConfig: object[] }} */
 export function roomConfig() {
   const extra = loadExtraIceServers();

@@ -15,6 +15,7 @@ import {
   isFixtureMode,
   readJoinHostPeerId,
   readJoinSessionId,
+  readPermanentRoomId,
 } from "../invite.js";
 import { log } from "../log.js";
 import {
@@ -22,7 +23,7 @@ import {
   compressImage,
   formatBytes,
   isDeferredPlayableSize,
-  isGatedPlayableMime,
+  isDeferredTransferMime,
   middleTruncate,
   mintMediaId,
   prepareAudio,
@@ -51,6 +52,8 @@ const els = {
   landing: document.querySelector("#landing"),
   landingForm: document.querySelector("#landing-form"),
   landingName: document.querySelector("#landing-name"),
+  landingRoom: document.querySelector("#landing-room"),
+  landingRoomField: document.querySelector("#landing-room-field"),
   landingTitle: document.querySelector("#landing-title"),
   landingTitleField: document.querySelector("#landing-title-field"),
   landingJoinHint: document.querySelector("#landing-join-hint"),
@@ -121,9 +124,11 @@ const seenMessageIds = new Map();
 
 const joinId = readJoinSessionId();
 const joinHostId = readJoinHostPeerId();
+const permanentRoomId = readPermanentRoomId();
 log("boot", {
   href: location.href,
   joinId,
+  permanentRoomId,
   fixture: isFixtureMode(),
   build: "phase7-polish",
 });
@@ -506,7 +511,7 @@ function paint() {
           m.kind === "file" ||
           (m.kind === "media" &&
             m.mediaIds.length === 1 &&
-            isGatedPlayableMime(mimeLc));
+            isDeferredTransferMime(mimeLc));
         return asDeferred && m.mediaIds.some((id) => !resolveMediaUrl(id));
       });
       if (!waiting) setUploadStatus("");
@@ -1086,6 +1091,48 @@ async function startOnlineGuest(displayName, sessionId, resume) {
   }
 }
 
+/**
+ * @param {string} displayName
+ * @param {string} roomId
+ * @param {import("../resume.js").ResumeBlob} [resume]
+ */
+async function startPermanentRoom(displayName, roomId, resume) {
+  mode = "online";
+  session = new ChatSession({
+    onChange: () => {
+      if (session?.sessionEnded) clearResume();
+      else persistResume();
+      paint();
+    },
+    onStatus: (s) => {
+      if (els.connStatus) els.connStatus.textContent = s;
+      if (els.modeBadge && session) {
+        els.modeBadge.textContent =
+          session.role === "host"
+            ? "Room host"
+            : session.role === "candidate"
+              ? "Room"
+              : "Member";
+      }
+    },
+    onError: (m) => showBanner(m, false),
+    onProgress: (label) => setUploadStatus(label || ""),
+  });
+  enterAppShell({ badge: "Room", status: "Looking for room" });
+  try {
+    await session.enterPermanentRoom({ displayName, roomId, resume });
+    if (els.inviteBox && els.inviteUrl && session.inviteUrl) {
+      els.inviteBox.hidden = false;
+      els.inviteUrl.value = session.inviteUrl;
+    }
+    persistResume();
+    paint();
+  } catch (e) {
+    showBanner(e?.message || String(e), false);
+    els.connStatus.textContent = "Connection failed";
+  }
+}
+
 function openAddMembersModal() {
   const store = getStore();
   if (!store || !activeChatId) return;
@@ -1275,7 +1322,7 @@ function resolvePlayableMediaUrl(mediaId, gate = {}) {
     const size = Number(gate.size) || entry.size || 0;
     const mime = String(gate.mime || entry.mime || "").toLowerCase();
     const large =
-      isGatedPlayableMime(mime) && size > VIDEO_AUTO_DOWNLOAD_BYTES;
+      isDeferredTransferMime(mime) && size > VIDEO_AUTO_DOWNLOAD_BYTES;
     if (large && !gate.outgoing && !unlockedFixtureMedia.has(mediaId)) {
       return null;
     }
@@ -1841,23 +1888,56 @@ if (isFixtureMode()) {
   if (joinId) {
     // Join links only need a display name — remove title field entirely.
     els.landingTitleField?.remove();
+    els.landingRoomField?.remove();
     if (els.landingJoinHint) {
       els.landingJoinHint.hidden = false;
       els.landingJoinHint.textContent = `Joining session ${joinId}`;
     }
     if (els.landingSubmit) els.landingSubmit.textContent = "Join session";
+  } else {
+    const updateEntryMode = () => {
+      const roomId = String(
+        permanentRoomId || els.landingRoom?.value || "",
+      ).trim();
+      if (els.landingTitleField) els.landingTitleField.hidden = Boolean(roomId);
+      if (els.landingSubmit) {
+        els.landingSubmit.textContent = roomId
+          ? "Enter room"
+          : "Create session";
+      }
+      if (els.landingJoinHint) {
+        els.landingJoinHint.hidden = !roomId;
+        els.landingJoinHint.textContent = roomId
+          ? `Reusable room ${roomId} · readable IDs can be discovered if guessed`
+          : "";
+      }
+    };
+    if (permanentRoomId && els.landingRoom) {
+      els.landingRoom.value = permanentRoomId;
+    }
+    els.landingRoom?.addEventListener("input", updateEntryMode);
+    updateEntryMode();
   }
 
   // Auto-resume after refresh (same tab). Prefer ?join= when present.
-  if (
-    resume &&
-    !isFixtureMode() &&
-    (!joinId || (resume.role === "guest" && resume.sessionId === joinId))
-  ) {
+  if (resume && !isFixtureMode()) {
     if (els.landingName) els.landingName.value = resume.displayName || "";
-    if (resume.role === "host" && !joinId) {
+    if (
+      !joinId &&
+      (permanentRoomId || resume.roomMode === "permanent") &&
+      (!permanentRoomId || resume.permanentRoomId === permanentRoomId)
+    ) {
+      startPermanentRoom(
+        resume.displayName,
+        permanentRoomId || resume.permanentRoomId,
+        resume,
+      );
+    } else if (resume.role === "host" && !joinId && !permanentRoomId) {
       startOnlineHost(resume.displayName, resume.title || "", resume);
-    } else if (resume.role === "guest") {
+    } else if (
+      resume.role === "guest" &&
+      (!joinId || resume.sessionId === joinId)
+    ) {
       const sid = joinId || resume.sessionId;
       startOnlineGuest(resume.displayName, sid, resume);
     }
@@ -1870,6 +1950,8 @@ if (isFixtureMode()) {
     clearResume();
     if (joinId) {
       startOnlineGuest(displayName, joinId);
+    } else if (els.landingRoom?.value?.trim()) {
+      startPermanentRoom(displayName, els.landingRoom.value.trim());
     } else {
       startOnlineHost(displayName, els.landingTitle?.value?.trim() || "");
     }

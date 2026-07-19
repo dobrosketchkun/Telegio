@@ -6,13 +6,17 @@ const KEY = "ephchat.resume";
 
 /**
  * @typedef {{
- *   role: "host" | "guest",
+ *   role: "host" | "guest" | "candidate",
  *   sessionId: string,
  *   displayName: string,
  *   title?: string,
  *   hostState?: object,
  *   dmState?: object,
  *   hostPeerId?: string,
+ *   roomMode?: "random" | "permanent",
+ *   permanentRoomId?: string,
+ *   electionTerm?: number,
+ *   leaseExpiry?: number,
  *   savedAt: number,
  * }} ResumeBlob
  */
