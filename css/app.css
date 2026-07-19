@@ -1617,6 +1617,42 @@ body.is-resizing {
   display: block;
 }
 
+.attach-pending__remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s;
+}
+
+.attach-pending__thumb:hover .attach-pending__remove,
+.attach-pending__remove:focus-visible {
+  opacity: 1;
+}
+
+.attach-pending__remove:hover {
+  background: rgba(0, 0, 0, 0.8);
+}
+
+/* Touch devices have no hover: keep the remove control visible. */
+@media (hover: none) {
+  .attach-pending__remove {
+    opacity: 1;
+  }
+}
+
 .attach-pending__clear {
   margin-left: auto;
   align-self: center;

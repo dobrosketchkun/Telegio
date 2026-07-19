@@ -1777,6 +1777,13 @@ function clearPendingFiles() {
   renderPendingStrip();
 }
 
+/** @param {number} index */
+function removePendingFile(index) {
+  const [removed] = pendingFiles.splice(index, 1);
+  if (removed) URL.revokeObjectURL(removed.url);
+  renderPendingStrip();
+}
+
 function renderPendingStrip() {
   if (!els.attachPending) return;
   els.attachPending.innerHTML = "";
@@ -1785,7 +1792,7 @@ function renderPendingStrip() {
     return;
   }
   els.attachPending.hidden = false;
-  for (const p of pendingFiles) {
+  pendingFiles.forEach((p, index) => {
     const wrap = document.createElement("div");
     wrap.className = "attach-pending__thumb";
     if (p.file.type.startsWith("video/")) {
@@ -1804,8 +1811,19 @@ function renderPendingStrip() {
       wrap.textContent = middleTruncate(p.file.name || "File", 14);
       wrap.title = p.file.name || "File";
     }
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "attach-pending__remove";
+    remove.setAttribute("aria-label", "Remove attachment");
+    remove.title = "Remove";
+    remove.textContent = "×";
+    remove.addEventListener("click", (e) => {
+      e.stopPropagation();
+      removePendingFile(index);
+    });
+    wrap.append(remove);
     els.attachPending.append(wrap);
-  }
+  });
   const clear = document.createElement("button");
   clear.type = "button";
   clear.className = "btn btn--small attach-pending__clear";
@@ -2221,6 +2239,27 @@ els.attachInput?.addEventListener("change", () => {
     addPendingFiles(els.attachInput.files);
     els.attachInput.value = "";
   }
+});
+
+// Paste images/videos/files straight from the clipboard (screenshots, or a
+// file copied from the OS file manager), like other modern chat apps.
+els.composeInput?.addEventListener("paste", (e) => {
+  const data = e.clipboardData;
+  if (!data || !activeChatId) return;
+  /** @type {File[]} */
+  const files = [];
+  if (data.items?.length) {
+    for (const item of data.items) {
+      if (item.kind === "file") {
+        const file = item.getAsFile();
+        if (file) files.push(file);
+      }
+    }
+  }
+  if (!files.length && data.files?.length) files.push(...data.files);
+  if (!files.length) return; // plain text paste: let the textarea handle it
+  e.preventDefault();
+  addPendingFiles(files);
 });
 
 els.lightbox?.addEventListener("click", (e) => {
