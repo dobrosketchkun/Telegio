@@ -21,26 +21,93 @@ const PACK_JSON_FETCHERS = [
 ];
 
 /**
- * Fetch the raw sticker image bytes so they can be relayed to a peer whose
- * network cannot reach the sticker site. Uses the same CORS-proxy fallbacks as
- * pack JSON. Throws when the bytes are unreachable from here too.
+ * Image CDN with CORS (*). Fetches the upstream sticker server-side, so peers
+ * who can reach wsrv but not stickers.from.tg still get bytes — and so we can
+ * `fetch()` sticker images in the browser (stickers.from.tg itself has no ACAO).
+ * @param {string} upstreamUrl
+ */
+export function corsImageUrl(upstreamUrl) {
+  return `https://wsrv.nl/?url=${encodeURIComponent(upstreamUrl)}`;
+}
+
+/** @param {string} pack @param {string} stickerId */
+export function stickerCorsFileUrl(pack, stickerId) {
+  return corsImageUrl(stickerFileUrl(pack, stickerId));
+}
+
+/** @param {string} pack @param {string} stickerId */
+export function stickerCorsThumbUrl(pack, stickerId) {
+  return corsImageUrl(stickerThumbUrl(pack, stickerId));
+}
+
+/**
+ * Ordered display/fetch candidates: direct CDN, then CORS image proxy.
+ * @param {string} pack @param {string} stickerId @param {"file" | "thumb"} [kind]
+ * @returns {string[]}
+ */
+export function stickerSrcChain(pack, stickerId, kind = "file") {
+  if (kind === "thumb") {
+    return [
+      stickerThumbUrl(pack, stickerId),
+      stickerCorsThumbUrl(pack, stickerId),
+    ];
+  }
+  return [stickerFileUrl(pack, stickerId), stickerCorsFileUrl(pack, stickerId)];
+}
+
+/**
+ * Point an <img> at the first working URL in the chain. Calls onExhausted only
+ * after every candidate fails (then peer-relay can take over).
+ * @param {HTMLImageElement} img
+ * @param {string[]} urls
+ * @param {() => void} [onExhausted]
+ */
+export function bindStickerSrc(img, urls, onExhausted) {
+  const chain = urls.filter(Boolean);
+  let i = 0;
+  if (!chain.length) {
+    onExhausted?.();
+    return;
+  }
+  const tryNext = () => {
+    if (i >= chain.length) {
+      onExhausted?.();
+      return;
+    }
+    img.src = chain[i++];
+  };
+  img.addEventListener("error", tryNext);
+  tryNext();
+}
+
+/**
+ * Fetch raw sticker bytes for peer relay / local cache. Prefer the CORS image
+ * proxy because stickers.from.tg has no Access-Control-Allow-Origin (so a peer
+ * who can *see* stickers via <img> still couldn't fetch() them before).
  * @param {string} pack @param {string} stickerId
  * @returns {Promise<Blob>}
  */
 export async function fetchStickerBytes(pack, stickerId) {
-  const url = stickerFileUrl(pack, stickerId);
   /** @type {unknown} */
   let lastError = null;
-  for (const wrap of PACK_JSON_FETCHERS) {
+  for (const url of stickerSrcChain(pack, stickerId, "file")) {
     try {
-      const res = await fetch(wrap(url));
+      const res = await fetch(url);
       if (!res.ok) {
         lastError = new Error(`HTTP ${res.status}`);
         continue;
       }
       const blob = await res.blob();
-      if (blob && blob.size > 0) return blob;
-      lastError = new Error("Empty sticker");
+      if (!blob || blob.size === 0) {
+        lastError = new Error("Empty sticker");
+        continue;
+      }
+      // Reject HTML/JSON error pages some proxies return with a 200.
+      if (blob.type && !blob.type.startsWith("image/")) {
+        lastError = new Error(`Not an image (${blob.type})`);
+        continue;
+      }
+      return blob.type ? blob : new Blob([blob], { type: "image/webp" });
     } catch (e) {
       lastError = e;
     }

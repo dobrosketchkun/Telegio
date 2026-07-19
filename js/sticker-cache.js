@@ -8,6 +8,8 @@
  * js/stickers.js.
  */
 
+import { fetchStickerBytes } from "./stickers.js";
+
 const DB_NAME = "ephchat-stickers";
 const STORE = "blobs";
 
@@ -94,6 +96,36 @@ export async function putSticker(pack, stickerId, blob) {
  */
 export function getStickerBlob(pack, stickerId) {
   return readBlob(stickerKey(pack, stickerId));
+}
+
+/**
+ * Ensure sticker bytes are in the local cache (fetch via CORS proxy if needed).
+ * Call before sending so peers who can't reach the sticker site can pull from us.
+ * @param {string} pack @param {string} stickerId
+ * @returns {Promise<string | null>} object URL, or null on failure
+ */
+export async function ensureStickerCached(pack, stickerId) {
+  const existing = await warmStickerUrl(pack, stickerId);
+  if (existing) return existing;
+  try {
+    const blob = await fetchStickerBytes(pack, stickerId);
+    return await putSticker(pack, stickerId, blob);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Best-effort background fill of a pack's stickers into the cache.
+ * @param {{ name: string, stickers?: Array<{ id: string }> }} pack
+ * @param {number} [limit]
+ */
+export function warmPackCache(pack, limit = 24) {
+  if (!pack?.name) return;
+  const stickers = Array.isArray(pack.stickers) ? pack.stickers : [];
+  for (const s of stickers.slice(0, limit)) {
+    if (s?.id) ensureStickerCached(pack.name, s.id);
+  }
 }
 
 /** @param {string} key @returns {Promise<Blob | null>} */

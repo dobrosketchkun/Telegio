@@ -48,12 +48,17 @@ import { selfCheckEnvelope } from "../protocol.js";
 import { ChatSession } from "../session.js";
 import {
   addPacks,
+  bindStickerSrc,
   ensureFixturePacks,
   fetchPack,
   getPack,
-  stickerFileUrl,
+  stickerSrcChain,
 } from "../stickers.js";
-import { cachedStickerUrl } from "../sticker-cache.js";
+import {
+  cachedStickerUrl,
+  ensureStickerCached,
+  warmPackCache,
+} from "../sticker-cache.js";
 import { addPacksFromText, createPicker } from "./picker.js";
 import { renderChatList, renderThread } from "./render.js";
 
@@ -495,19 +500,35 @@ function paint() {
       onReact: (messageId, emoji) => reactToMessage(messageId, emoji),
       onForward: (messageId) => openForwardModal(messageId),
       onOpenStickerPack: (ref) => openStickerPackModal(ref),
-      onStickerLoaded: () => {
+      onStickerLoaded: (pack, stickerId) => {
         if (mode === "online" && session) session.markStickerSiteReachable();
+        // Keep a local copy so we can relay to peers who can't reach the CDN.
+        if (pack && stickerId) ensureStickerCached(pack, stickerId);
       },
       onStickerError: (pack, stickerId, senderPeerId) => {
-        if (mode === "online" && session) {
-          session.requestSticker(pack, stickerId, senderPeerId);
-        }
+        // Last resort after CDN + CORS proxy: pull bytes from a peer.
+        ensureStickerCached(pack, stickerId).then((url) => {
+          if (url) {
+            schedulePaint();
+            return;
+          }
+          if (mode === "online" && session) {
+            session.requestSticker(pack, stickerId, senderPeerId);
+          }
+        });
       },
       onRefetchSticker: (pack, stickerId, senderPeerId) => {
-        if (mode === "online" && session) {
-          session.requestSticker(pack, stickerId, senderPeerId);
-          showBanner("Requesting sticker from a peer…", true);
-        }
+        ensureStickerCached(pack, stickerId).then((url) => {
+          if (url) {
+            schedulePaint();
+            showBanner("Sticker loaded", true);
+            return;
+          }
+          if (mode === "online" && session) {
+            session.requestSticker(pack, stickerId, senderPeerId);
+            showBanner("Requesting sticker from a peer…", true);
+          }
+        });
       },
       onBack: () => {
         activeChatId = null;
@@ -966,6 +987,9 @@ function insertAtCursor(input, text) {
  */
 function sendSticker(ref) {
   if (!activeChatId) return;
+  // Cache bytes before/while sending so peers can pull from us if the CDN
+  // is blocked for them (fetch uses a CORS image proxy).
+  ensureStickerCached(ref.pack, ref.stickerId);
   const store = getStore();
   if (!store) return;
   const thread = getChatThread(
@@ -1459,12 +1483,29 @@ function buildStickerModalGrid(pack) {
     btn.className = "sticker-modal-cell";
     btn.title = s.emoji || s.id;
     const img = document.createElement("img");
-    img.src = s.thumbnail_url || stickerFileUrl(pack.name, s.id);
     img.alt = s.emoji || "sticker";
     img.loading = "lazy";
-    img.addEventListener("error", () => {
-      img.replaceWith(document.createTextNode(s.emoji || "?"));
-    });
+    const cached = cachedStickerUrl(pack.name, s.id);
+    bindStickerSrc(
+      img,
+      [
+        cached,
+        s.thumbnail_url,
+        ...stickerSrcChain(pack.name, s.id, "thumb"),
+        ...stickerSrcChain(pack.name, s.id, "file"),
+      ],
+      () => {
+        img.replaceWith(document.createTextNode(s.emoji || "?"));
+        // Ask the peer who opened this pack context (if any) for the image.
+        if (mode === "online" && session && activePackModal?.senderPeerId) {
+          session.requestSticker(
+            pack.name,
+            s.id,
+            activePackModal.senderPeerId,
+          );
+        }
+      },
+    );
     btn.append(img);
     btn.addEventListener("click", () => {
       sendSticker({ pack: pack.name, stickerId: s.id, emoji: s.emoji });
@@ -1483,6 +1524,13 @@ function buildStickerModalGrid(pack) {
 function openStickerPackModal(ref) {
   const installed = getPack(ref.pack);
   if (installed) {
+    activePackModal = {
+      pack: ref.pack,
+      stickerId: ref.stickerId,
+      emoji: ref.emoji,
+      senderPeerId: ref.senderPeerId,
+    };
+    warmPackCache(installed);
     openModal(
       installed.title || installed.name,
       (body) => {
@@ -1547,6 +1595,7 @@ function showPackInModal(pack) {
   els.modalTitle.textContent = pack.title || pack.name;
   els.modalBody.innerHTML = "";
   els.modalBody.append(buildStickerModalGrid(pack));
+  warmPackCache(pack);
   if (els.modalOk) {
     els.modalOk.hidden = false;
     els.modalOk.disabled = false;
@@ -1556,6 +1605,8 @@ function showPackInModal(pack) {
     const result = await addPacks([pack.name]);
     if (result.ok.length) {
       showBanner(`Added ${pack.title || pack.name}`, true);
+      const installed = getPack(pack.name);
+      if (installed) warmPackCache(installed);
       picker.focusPack(result.ok);
     } else {
       showBanner("Could not add pack", false);
@@ -1572,12 +1623,17 @@ function renderPackModalUnavailable(ref) {
   const cell = document.createElement("div");
   cell.className = "sticker-modal-cell";
   const img = document.createElement("img");
-  const cached = cachedStickerUrl(ref.pack, ref.stickerId);
-  img.src = cached || stickerFileUrl(ref.pack, ref.stickerId);
   img.alt = ref.emoji || "sticker";
-  img.addEventListener("error", () => {
-    img.replaceWith(document.createTextNode(ref.emoji || "?"));
-  });
+  bindStickerSrc(
+    img,
+    [
+      cachedStickerUrl(ref.pack, ref.stickerId),
+      ...stickerSrcChain(ref.pack, ref.stickerId, "file"),
+    ],
+    () => {
+      img.replaceWith(document.createTextNode(ref.emoji || "?"));
+    },
+  );
   cell.append(img);
   wrap.append(cell);
   els.modalBody.append(wrap);

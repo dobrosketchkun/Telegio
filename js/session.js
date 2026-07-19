@@ -2946,21 +2946,20 @@ function classifyMediaBatch(files) {
 const STICKER_MEDIA_PREFIX = "st:";
 
 /**
- * pack/id are joined with a NUL separator so ids containing "/" or ":" (base64url
- * sticker ids) never collide.
+ * Pack names are [A-Za-z0-9_]+ so "/" is a safe separator from the sticker id.
  * @param {string} pack @param {string} stickerId
  */
 function stickerMediaId(pack, stickerId) {
-  return `${STICKER_MEDIA_PREFIX}${pack}\u0000${stickerId}`;
+  return `${STICKER_MEDIA_PREFIX}${pack}/${stickerId}`;
 }
 
 /** @param {string} id @returns {{ pack: string, stickerId: string }} */
 function parseStickerMediaId(id) {
   const rest = id.slice(STICKER_MEDIA_PREFIX.length);
-  const nul = rest.indexOf("\u0000");
-  return nul < 0
+  const slash = rest.indexOf("/");
+  return slash < 0
     ? { pack: rest, stickerId: "" }
-    : { pack: rest.slice(0, nul), stickerId: rest.slice(nul + 1) };
+    : { pack: rest.slice(0, slash), stickerId: rest.slice(slash + 1) };
 }
 
 /**

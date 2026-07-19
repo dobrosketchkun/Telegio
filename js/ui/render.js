@@ -5,7 +5,7 @@ import {
   formatBytes,
   middleTruncate,
 } from "../media.js";
-import { stickerFileUrl } from "../stickers.js";
+import { bindStickerSrc, stickerSrcChain } from "../stickers.js";
 import { cachedStickerUrl, warmStickerUrl } from "../sticker-cache.js";
 import { verifyHandle } from "../tripcode.js";
 import { EMOJI } from "./picker.js";
@@ -207,7 +207,7 @@ export function renderChatList(root, chats, activeId, unread, onSelect, opts = {
  *   onOpenMedia?: (mediaId: string, messageId: string) => void,
  *   onDownloadMedia?: (mediaId: string) => void,
  *   onStickerError?: (pack: string, stickerId: string, senderPeerId?: string) => void,
- *   onStickerLoaded?: () => void,
+ *   onStickerLoaded?: (pack: string, stickerId: string) => void,
  *   onRefetchSticker?: (pack: string, stickerId: string, senderPeerId?: string) => void,
  *   requestRepaint?: () => void,
  * }} [opts]
@@ -599,30 +599,32 @@ export function renderThread(
       media.className = "bubble__sticker";
       const img = document.createElement("img");
       img.className = "sticker-img";
-      const cached = cachedStickerUrl(pack, stickerId);
-      img.src = cached || stickerFileUrl(pack, stickerId);
       img.alt = "sticker";
       img.loading = "lazy";
-      // A cached blob URL may live in IndexedDB but not yet in memory: warm it
-      // and repaint so this <img> swaps to the local copy.
+      const cached = cachedStickerUrl(pack, stickerId);
+      // IndexedDB may have bytes we haven't hydrated yet — warm + repaint.
       if (!cached) {
         warmStickerUrl(pack, stickerId).then((url) => {
           if (url) opts.requestRepaint?.();
         });
       }
       img.addEventListener("load", () => {
-        // A successful load from the site proves we have access — let the session
-        // advertise itself as a relay source for peers who don't.
-        if (!cached) opts.onStickerLoaded?.();
+        if (!cached) opts.onStickerLoaded?.(pack, stickerId);
       });
-      img.addEventListener("error", () => {
-        const fallback = document.createElement("span");
-        fallback.className = "sticker-fallback";
-        fallback.textContent = "sticker";
-        img.replaceWith(fallback);
-        // Pull the bytes from the sender (or any peer with access) and cache.
-        opts.onStickerError?.(pack, stickerId, msg.senderPeerId);
-      });
+      // cached → direct CDN → CORS image proxy → peer pull.
+      bindStickerSrc(
+        img,
+        cached
+          ? [cached, ...stickerSrcChain(pack, stickerId, "file")]
+          : stickerSrcChain(pack, stickerId, "file"),
+        () => {
+          const fallback = document.createElement("span");
+          fallback.className = "sticker-fallback";
+          fallback.textContent = "sticker";
+          img.replaceWith(fallback);
+          opts.onStickerError?.(pack, stickerId, msg.senderPeerId);
+        },
+      );
       media.append(img);
       if (typeof opts.onOpenStickerPack === "function") {
         media.classList.add("bubble__sticker--clickable");

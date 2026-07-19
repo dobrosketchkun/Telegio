@@ -1,5 +1,6 @@
 import {
   addPacks,
+  bindStickerSrc,
   getPack,
   listEmojiRecents,
   listPacks,
@@ -8,9 +9,12 @@ import {
   pushEmojiRecent,
   pushRecent,
   removePack,
+  stickerCorsFileUrl,
   stickerFileUrl,
+  stickerSrcChain,
   stickerThumbUrl,
 } from "../stickers.js";
+import { ensureStickerCached } from "../sticker-cache.js";
 import { EMOJI_CATEGORIES } from "./emoji-data.js";
 import { emojiImg } from "./twemoji.js";
 
@@ -403,15 +407,23 @@ export function createPicker(root, hooks) {
       btn.type = "button";
       btn.className = "picker__sticker";
       btn.title = s.emoji || s.id;
-      btn.dataset.full = stickerFileUrl(s.pack, s.id);
+      btn.dataset.full = stickerCorsFileUrl(s.pack, s.id);
       const img = document.createElement("img");
-      img.src = s.thumbnail_url || stickerThumbUrl(s.pack, s.id);
       img.alt = s.emoji || "sticker";
       img.loading = "lazy";
       img.draggable = false;
-      img.addEventListener("error", () => {
-        img.replaceWith(document.createTextNode(s.emoji || "?"));
-      });
+      bindStickerSrc(
+        img,
+        [
+          s.thumbnail_url,
+          stickerThumbUrl(s.pack, s.id),
+          ...stickerSrcChain(s.pack, s.id, "thumb").slice(1),
+          ...stickerSrcChain(s.pack, s.id, "file"),
+        ],
+        () => {
+          img.replaceWith(document.createTextNode(s.emoji || "?"));
+        },
+      );
       btn.append(img);
       btn.addEventListener("click", () => {
         if (suppressStickerClick) {
@@ -419,6 +431,8 @@ export function createPicker(root, hooks) {
           return;
         }
         const ref = { pack: s.pack, stickerId: s.id, emoji: s.emoji };
+        // Warm the byte cache so peers who can't reach the sticker site can pull.
+        ensureStickerCached(ref.pack, ref.stickerId);
         pushRecent(ref);
         hooks.onSticker(ref);
       });
@@ -453,11 +467,18 @@ export function createPicker(root, hooks) {
       const thumb = pack.stickers[0];
       if (thumb) {
         const img = document.createElement("img");
-        img.src = thumb.thumbnail_url;
         img.alt = "";
-        img.addEventListener("error", () => {
-          img.replaceWith(document.createTextNode(pack.name.slice(0, 1)));
-        });
+        bindStickerSrc(
+          img,
+          [
+            thumb.thumbnail_url,
+            ...stickerSrcChain(pack.name, thumb.id, "thumb"),
+            ...stickerSrcChain(pack.name, thumb.id, "file"),
+          ],
+          () => {
+            img.replaceWith(document.createTextNode(pack.name.slice(0, 1)));
+          },
+        );
         btn.append(img);
       } else {
         btn.textContent = pack.name.slice(0, 1);
