@@ -64,6 +64,8 @@ const els = {
   landingRoomField: document.querySelector("#landing-room-field"),
   landingTitle: document.querySelector("#landing-title"),
   landingTitleField: document.querySelector("#landing-title-field"),
+  landingPassword: document.querySelector("#landing-password"),
+  landingPasswordField: document.querySelector("#landing-password-field"),
   landingJoinHint: document.querySelector("#landing-join-hint"),
   landingSubmit: document.querySelector("#landing-submit"),
   app: document.querySelector("#app"),
@@ -1191,8 +1193,9 @@ function persistResume() {
  * @param {string} displayName
  * @param {string} title
  * @param {import("../resume.js").ResumeBlob} [resume]
+ * @param {string} [password]
  */
-async function startOnlineHost(displayName, title, resume) {
+async function startOnlineHost(displayName, title, resume, password) {
   mode = "online";
   session = new ChatSession({
     onChange: () => {
@@ -1214,6 +1217,7 @@ async function startOnlineHost(displayName, title, resume) {
       sessionId: resume?.sessionId,
       restoreHostState: resume?.hostState,
       previousHostPeerId: resume?.previousHostPeerId,
+      password: password ?? resume?.password,
     });
     if (resume?.dmState && resume.previousSelfPeerId) {
       session.dmState = remapDmPeer(
@@ -1238,8 +1242,9 @@ async function startOnlineHost(displayName, title, resume) {
  * @param {string} displayName
  * @param {string} sessionId
  * @param {import("../resume.js").ResumeBlob} [resume]
+ * @param {string} [password]
  */
-async function startOnlineGuest(displayName, sessionId, resume) {
+async function startOnlineGuest(displayName, sessionId, resume, password) {
   mode = "online";
   session = new ChatSession({
     onChange: () => {
@@ -1259,6 +1264,7 @@ async function startOnlineGuest(displayName, sessionId, resume) {
       displayName,
       sessionId,
       hostPeerId: joinHostId || resume?.hostPeerId || undefined,
+      password: password ?? resume?.password,
     });
     if (resume?.dmState && resume.previousSelfPeerId) {
       session.dmState = remapDmPeer(
@@ -1279,8 +1285,9 @@ async function startOnlineGuest(displayName, sessionId, resume) {
  * @param {string} displayName
  * @param {string} roomId
  * @param {import("../resume.js").ResumeBlob} [resume]
+ * @param {string} [password]
  */
-async function startPermanentRoom(displayName, roomId, resume) {
+async function startPermanentRoom(displayName, roomId, resume, password) {
   mode = "online";
   session = new ChatSession({
     onChange: () => {
@@ -1304,7 +1311,12 @@ async function startPermanentRoom(displayName, roomId, resume) {
   });
   enterAppShell({ badge: "Room", status: "Looking for room" });
   try {
-    await session.enterPermanentRoom({ displayName, roomId, resume });
+    await session.enterPermanentRoom({
+      displayName,
+      roomId,
+      resume,
+      password: password ?? resume?.password,
+    });
     if (els.inviteBox && els.inviteUrl && session.inviteUrl) {
       els.inviteBox.hidden = false;
       els.inviteUrl.value = session.inviteUrl;
@@ -2352,8 +2364,10 @@ if (isFixtureMode()) {
     els.landingRoomField?.remove();
     if (els.landingJoinHint) {
       els.landingJoinHint.hidden = false;
-      els.landingJoinHint.textContent = `Joining session ${joinId}`;
+      els.landingJoinHint.textContent = `Joining session ${joinId} · enter the password if the host set one`;
     }
+    const joinPwLabel = els.landingPasswordField?.querySelector("span");
+    if (joinPwLabel) joinPwLabel.textContent = "Password (if required)";
     if (els.landingSubmit) els.landingSubmit.textContent = "Join session";
   } else {
     const updateEntryMode = () => {
@@ -2369,8 +2383,14 @@ if (isFixtureMode()) {
       if (els.landingJoinHint) {
         els.landingJoinHint.hidden = !roomId;
         els.landingJoinHint.textContent = roomId
-          ? `Reusable room ${roomId} · readable IDs can be discovered if guessed`
+          ? `Reusable room ${roomId} · a password is required to connect if one is set`
           : "";
+      }
+      const pwLabel = els.landingPasswordField?.querySelector("span");
+      if (pwLabel) {
+        pwLabel.textContent = roomId
+          ? "Password (if required)"
+          : "Set a password (optional)";
       }
     };
     if (permanentRoomId && els.landingRoom) {
@@ -2408,13 +2428,24 @@ if (isFixtureMode()) {
     e.preventDefault();
     const displayName = els.landingName.value.trim();
     if (!displayName) return;
+    const password = els.landingPassword?.value || "";
     clearResume();
     if (joinId) {
-      startOnlineGuest(displayName, joinId);
+      startOnlineGuest(displayName, joinId, undefined, password);
     } else if (els.landingRoom?.value?.trim()) {
-      startPermanentRoom(displayName, els.landingRoom.value.trim());
+      startPermanentRoom(
+        displayName,
+        els.landingRoom.value.trim(),
+        undefined,
+        password,
+      );
     } else {
-      startOnlineHost(displayName, els.landingTitle?.value?.trim() || "");
+      startOnlineHost(
+        displayName,
+        els.landingTitle?.value?.trim() || "",
+        undefined,
+        password,
+      );
     }
   });
 }

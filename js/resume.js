@@ -8,6 +8,7 @@ const KEY = "ephchat.resume";
  * @typedef {{
  *   role: "host" | "guest" | "candidate",
  *   sessionId: string,
+ *   password?: string,
  *   displayName: string,
  *   title?: string,
  *   hostState?: object,

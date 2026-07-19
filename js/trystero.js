@@ -1,5 +1,6 @@
 import { APP_ID } from "./constants.js";
 import { loadSessionIdentity } from "./identity.js";
+import { deriveRoomKey } from "./ids.js";
 import { MultipathRoom } from "./multipath.js";
 
 /** Pinned Trystero MQTT strategy (jsDelivr ESM). */
@@ -50,14 +51,16 @@ export function loadExtraIceServers() {
  * MQTT and Nostr are joined concurrently. The returned selfId is a signed,
  * session-scoped logical ID rather than either strategy's transient ID.
  * @param {string} sessionId
+ * @param {string} [password] optional room password (derives the room key)
  * @returns {Promise<{ joinRoom: Function, selfId: string }>}
  */
-export async function loadTrystero(sessionId) {
+export async function loadTrystero(sessionId, password) {
   if (!sessionId) throw new Error("Missing session id");
-  const [mqttResult, nostrResult, identity] = await Promise.all([
+  const [mqttResult, nostrResult, identity, roomKey] = await Promise.all([
     import(TRYSTERO_MQTT).catch((error) => ({ error })),
     import(TRYSTERO_NOSTR).catch((error) => ({ error })),
     loadSessionIdentity(sessionId),
+    deriveRoomKey(sessionId, password),
   ]);
   const strategies = [];
   if (typeof mqttResult.joinRoom === "function") {
@@ -77,18 +80,25 @@ export async function loadTrystero(sessionId) {
       roomId,
       callbacks,
       identity,
+      roomKey,
     });
   return { joinRoom, selfId: identity.peerId };
 }
 
-/** @returns {{ appId: string, rtcConfig: { iceServers: object[] }, turnConfig: object[] }} */
-export function roomConfig() {
+/**
+ * @param {string} [password] encrypts Trystero's own SDP signaling when set
+ * @returns {{ appId: string, password?: string, rtcConfig: { iceServers: object[] }, turnConfig: object[] }}
+ */
+export function roomConfig(password) {
   const extra = loadExtraIceServers();
   const turns = [...turnServers, ...extra];
-  return {
+  /** @type {{ appId: string, password?: string, rtcConfig: { iceServers: object[] }, turnConfig: object[] }} */
+  const cfg = {
     appId: APP_ID,
     // Prefer turnConfig so Trystero keeps its own STUN defaults + ours.
     rtcConfig: { iceServers: [...iceServers, ...turns] },
     turnConfig: turns,
   };
+  if (password) cfg.password = String(password);
+  return cfg;
 }

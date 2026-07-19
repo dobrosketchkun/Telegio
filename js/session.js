@@ -22,6 +22,7 @@ import {
 } from "./engine.js";
 import {
   makeSessionId,
+  deriveTopic,
   dmIdFor,
   normalizePermanentRoomId,
   permanentSessionId,
@@ -115,6 +116,8 @@ export class ChatSession {
     this._pendingDisplayName = "";
     /** @type {string} */
     this._sessionId = "";
+    /** @type {string} optional room password (gates topic + keys; never shared in invite) */
+    this._password = "";
     /** @type {string} logical host id from the invite, when available */
     this._hostHint = "";
     /** @type {Map<string, MediaEntry>} blobs this peer holds (own sends + P2P downloads) */
@@ -228,6 +231,7 @@ export class ChatSession {
    *   restoreHostState?: object,
    *   restoreDmState?: object,
    *   previousHostPeerId?: string,
+   *   password?: string,
    * }} opts
    */
   async createHost(opts) {
@@ -235,9 +239,10 @@ export class ChatSession {
     const title = String(opts.title || "").trim() || "Session";
     const sessionId = String(opts.sessionId || "").trim() || makeSessionId();
     this._sessionId = sessionId;
+    this._password = String(opts.password || "");
     this.hooks.onStatus("Connecting…");
 
-    const { joinRoom, selfId } = await loadTrystero(sessionId);
+    const { joinRoom, selfId } = await loadTrystero(sessionId, this._password);
     this.selfPeerId = selfId;
     this.role = "host";
     log("host", "trystero loaded", { selfId });
@@ -287,7 +292,7 @@ export class ChatSession {
   }
 
   /**
-   * @param {{ displayName: string, sessionId: string, hostPeerId?: string }} opts
+   * @param {{ displayName: string, sessionId: string, hostPeerId?: string, password?: string }} opts
    */
   async joinGuest(opts) {
     const displayName = String(opts.displayName || "").trim() || "Guest";
@@ -295,7 +300,8 @@ export class ChatSession {
     if (!sessionId) throw new Error("Missing session id");
 
     this.hooks.onStatus("Connecting…");
-    const { joinRoom, selfId } = await loadTrystero(sessionId);
+    this._password = String(opts.password || "");
+    const { joinRoom, selfId } = await loadTrystero(sessionId, this._password);
     this.selfPeerId = selfId;
     this.role = "guest";
     this.dmState = createEmptyDmState();
@@ -315,7 +321,7 @@ export class ChatSession {
   /**
    * Join a reusable host-independent room, discover its host, or take part in
    * deterministic election when no valid host claim is reachable.
-   * @param {{ displayName: string, roomId: string, resume?: object }} opts
+   * @param {{ displayName: string, roomId: string, resume?: object, password?: string }} opts
    */
   async enterPermanentRoom(opts) {
     const displayName = String(opts.displayName || "").trim() || "Member";
@@ -324,6 +330,7 @@ export class ChatSession {
     this.roomMode = "permanent";
     this.permanentRoomId = roomId;
     this._sessionId = sessionId;
+    this._password = String(opts.password || "");
     this._pendingDisplayName = displayName;
     this.inviteUrl = mintPermanentRoomUrl(roomId);
     this.role = "candidate";
@@ -336,7 +343,7 @@ export class ChatSession {
       : 0;
     this.hooks.onStatus("Looking for room");
 
-    const { joinRoom, selfId } = await loadTrystero(sessionId);
+    const { joinRoom, selfId } = await loadTrystero(sessionId, this._password);
     this.selfPeerId = selfId;
     this._candidateIds = new Set([selfId]);
     if (
@@ -402,6 +409,7 @@ export class ChatSession {
     return {
       role: this.role,
       sessionId: this._sessionId,
+      password: this._password || undefined,
       displayName:
         this.hostState?.roster?.find((r) => r.peerId === this.selfPeerId)
           ?.displayName ||
@@ -1139,15 +1147,17 @@ export class ChatSession {
    * @param {string} sessionId
    */
   async _joinRoom(joinRoom, sessionId) {
-    const cfg = roomConfig();
+    const cfg = roomConfig(this._password);
+    const topic = await deriveTopic(sessionId, this._password);
     log("room", "joinRoom", {
       sessionId,
       role: this.role,
       appId: cfg.appId,
+      hasPassword: Boolean(this._password),
       iceServers: cfg.rtcConfig?.iceServers?.map((s) => s.urls),
       turnCount: cfg.turnConfig?.length || 0,
     });
-    const room = joinRoom(cfg, sessionId, {
+    const room = joinRoom(cfg, topic, {
       onJoinError: (err) => {
         logError("room", "onJoinError", err);
         this.hooks.onError(err?.message || String(err));

@@ -1,5 +1,5 @@
 import { log, warn } from "./log.js";
-import { verifySignedValue } from "./identity.js";
+import { openWithKey, sealWithKey, verifySignedValue } from "./identity.js";
 
 const INTERNAL_ACTION = "__ephchat_mux_v1";
 const BROADCAST = "*";
@@ -12,6 +12,8 @@ const SEEN_MAX = 8_000;
 const RATE_WINDOW_MS = 1_000;
 const RATE_MAX_MESSAGES = 600;
 const RATE_MAX_CHARS = 12 * 1024 * 1024;
+const PENDING_MAX_PER_DEST = 50;
+const PENDING_TTL_MS = 30_000;
 
 /**
  * A Trystero-compatible room facade backed by multiple independent strategies.
@@ -25,12 +27,15 @@ export class MultipathRoom {
    *   roomId: string,
    *   callbacks?: object,
    *   identity: import("./identity.js").SessionIdentity,
+   *   roomKey?: CryptoKey | null,
    * }} opts
    */
   constructor(opts) {
     this.identity = opts.identity;
     this.selfId = opts.identity.peerId;
     this.roomId = opts.roomId;
+    /** @type {CryptoKey | null} room-wide key for broadcast payloads */
+    this._roomKey = opts.roomKey || null;
     this.callbacks = opts.callbacks || {};
     /** @type {Map<string, { name: string, room: object, action: object }>} */
     this._strategies = new Map();
@@ -44,6 +49,8 @@ export class MultipathRoom {
     this._verifying = new Set();
     this._rate = new Map();
     this._inboundQueues = new Map();
+    /** @type {Map<string, { actionName: string, data: object, at: number }[]>} */
+    this._pendingSends = new Map();
     this._sendQueue = Promise.resolve();
     this._closed = false;
     this._onPeerJoin = null;
@@ -154,6 +161,7 @@ export class MultipathRoom {
     this._strategies.clear();
     this._paths.clear();
     this._logicalPeers.clear();
+    this._pendingSends.clear();
   }
 
   _joinStrategy(strategy, config) {
@@ -212,6 +220,7 @@ export class MultipathRoom {
       kind: "identity",
       peerId: this.selfId,
       publicJwk: this.identity.publicJwk,
+      ecdhJwk: this.identity.ecdhPublicJwk,
       issuedAt: Date.now(),
       nonce: randomId(),
     };
@@ -253,14 +262,14 @@ export class MultipathRoom {
       return;
     }
     const wasUnbound = !this._paths.get(pathKey)?.logicalId;
-    this._bindPath(pathKey, core.peerId, core.publicJwk);
+    this._bindPath(pathKey, core.peerId, core.publicJwk, core.ecdhJwk);
     if (wasUnbound) {
       const path = this._paths.get(pathKey);
       if (path) this._sendIdentity(path.strategy, path.physicalId);
     }
   }
 
-  _bindPath(pathKey, logicalId, publicJwk) {
+  _bindPath(pathKey, logicalId, publicJwk, ecdhJwk) {
     if (!logicalId || logicalId === this.selfId) return;
     const path = this._paths.get(pathKey);
     if (!path) return;
@@ -271,29 +280,74 @@ export class MultipathRoom {
     let peer = this._logicalPeers.get(logicalId);
     const isNew = !peer;
     if (!peer) {
-      peer = { publicJwk, lastSeen: Date.now(), directPaths: new Set() };
+      peer = {
+        publicJwk,
+        ecdhJwk,
+        lastSeen: Date.now(),
+        directPaths: new Set(),
+      };
       this._logicalPeers.set(logicalId, peer);
     }
     const isNewPath = !peer.directPaths.has(pathKey);
+    const hadEcdh = Boolean(peer.ecdhJwk);
     peer.publicJwk = publicJwk || peer.publicJwk;
+    if (ecdhJwk) peer.ecdhJwk = ecdhJwk;
     peer.lastSeen = Date.now();
     peer.directPaths.add(pathKey);
     if (isNew || isNewPath) this._onPeerJoin?.(logicalId);
+    if (!hadEcdh && peer.ecdhJwk) this._flushPending(logicalId);
     this._onPathChange?.();
   }
 
-  _markReachable(logicalId, publicJwk) {
+  _markReachable(logicalId, publicJwk, ecdhJwk) {
     if (!logicalId || logicalId === this.selfId) return;
     let peer = this._logicalPeers.get(logicalId);
     const isNew = !peer;
     if (!peer) {
-      peer = { publicJwk, lastSeen: Date.now(), directPaths: new Set() };
+      peer = {
+        publicJwk,
+        ecdhJwk,
+        lastSeen: Date.now(),
+        directPaths: new Set(),
+      };
       this._logicalPeers.set(logicalId, peer);
     }
+    const hadEcdh = Boolean(peer.ecdhJwk);
     peer.publicJwk = publicJwk || peer.publicJwk;
+    if (ecdhJwk) peer.ecdhJwk = ecdhJwk;
     peer.lastSeen = Date.now();
     if (isNew) this._onPeerJoin?.(logicalId);
     if (isNew) this._onPathChange?.();
+    if (!hadEcdh && peer.ecdhJwk) this._flushPending(logicalId);
+  }
+
+  /**
+   * Queue a targeted send whose recipient ECDH key is not yet known; flushed by
+   * {@link _flushPending} once the peer's key arrives (bounded + TTL).
+   * @param {string} destination
+   * @param {string} actionName
+   * @param {object} data
+   */
+  _bufferSend(destination, actionName, data) {
+    let queue = this._pendingSends.get(destination);
+    if (!queue) {
+      queue = [];
+      this._pendingSends.set(destination, queue);
+    }
+    queue.push({ actionName, data, at: Date.now() });
+    while (queue.length > PENDING_MAX_PER_DEST) queue.shift();
+  }
+
+  /** @param {string} logicalId */
+  _flushPending(logicalId) {
+    const queue = this._pendingSends.get(logicalId);
+    if (!queue?.length) return;
+    this._pendingSends.delete(logicalId);
+    const now = Date.now();
+    for (const item of queue) {
+      if (now - item.at > PENDING_TTL_MS) continue;
+      this._enqueueSend(item.actionName, item.data, logicalId);
+    }
   }
 
   _enqueueSend(actionName, data, destination) {
@@ -306,16 +360,36 @@ export class MultipathRoom {
 
   async _createAndTransmit(actionName, data, destination) {
     if (this._closed) throw new Error("Multipath room is closed");
+    const dest = destination || BROADCAST;
+    // Cleartext routing hint so relays keep media fanout without reading data.
+    const chunked = data?.type === "media-chunk";
+
+    let payload = data;
+    if (dest !== BROADCAST) {
+      const peer = this._logicalPeers.get(dest);
+      if (!peer?.ecdhJwk) {
+        // Recipient ECDH key unknown: buffer and flush once it is learned.
+        this._bufferSend(dest, actionName, data);
+        return;
+      }
+      payload = { __enc: 1, ...(await this.identity.seal(peer.ecdhJwk, data)) };
+    } else if (this._roomKey) {
+      // Broadcasts are readable by every swarm member (all hold the password).
+      payload = { __brc: 1, ...(await sealWithKey(this._roomKey, data)) };
+    }
+
     const core = {
       kind: "packet",
       packetId: randomId(),
       source: this.selfId,
-      destination: destination || BROADCAST,
+      destination: dest,
       createdAt: Date.now(),
       maxHops: MAX_HOPS,
       actionName,
-      data,
+      data: payload,
+      chunked,
       publicJwk: this.identity.publicJwk,
+      ecdhJwk: this.identity.ecdhPublicJwk,
     };
     const serializedLength = JSON.stringify(core).length;
     if (serializedLength > MAX_PACKET_CHARS) {
@@ -365,14 +439,33 @@ export class MultipathRoom {
     this._remember(core.packetId);
     const ingress = this._paths.get(ingressKey);
     if (route.hops.length === 1 && ingress && core.source !== this.selfId) {
-      this._bindPath(ingressKey, core.source, core.publicJwk);
+      this._bindPath(ingressKey, core.source, core.publicJwk, core.ecdhJwk);
     }
 
     const forSelf =
       core.destination === this.selfId || core.destination === BROADCAST;
     if (forSelf) {
-      this._markReachable(core.source, core.publicJwk);
-      this._deliver(core);
+      this._markReachable(core.source, core.publicJwk, core.ecdhJwk);
+      let delivered = core;
+      if (core.data && core.data.__enc) {
+        try {
+          const plain = await this.identity.open(core.ecdhJwk, core.data);
+          delivered = { ...core, data: plain };
+        } catch (error) {
+          warn("mux", "decrypt failed", core.packetId, error);
+          delivered = null;
+        }
+      } else if (core.data && core.data.__brc) {
+        try {
+          if (!this._roomKey) throw new Error("No room key");
+          const plain = await openWithKey(this._roomKey, core.data);
+          delivered = { ...core, data: plain };
+        } catch (error) {
+          warn("mux", "broadcast decrypt failed", core.packetId, error);
+          delivered = null;
+        }
+      }
+      if (delivered) this._deliver(delivered);
     }
 
     const shouldRelay =
@@ -416,7 +509,7 @@ export class MultipathRoom {
   async _sendOverPaths(packet, paths, ingressKey, directDestination) {
     const available = paths.filter((path) => path.key !== ingressKey);
     if (!available.length) return;
-    const isChunk = packet.core.data?.type === "media-chunk";
+    const isChunk = packet.core.chunked === true;
     if (isChunk) {
       if (directDestination) {
         await this._sendFirstAvailable(packet, available);
@@ -505,6 +598,11 @@ export class MultipathRoom {
     }
     for (const [id, seenAt] of this._seen) {
       if (now - seenAt > PACKET_MAX_AGE_MS) this._seen.delete(id);
+    }
+    for (const [dest, queue] of this._pendingSends) {
+      const fresh = queue.filter((item) => now - item.at <= PENDING_TTL_MS);
+      if (fresh.length) this._pendingSends.set(dest, fresh);
+      else this._pendingSends.delete(dest);
     }
   }
 

@@ -38,6 +38,55 @@ export async function permanentSessionId(roomId) {
 }
 
 /**
+ * Derive the actual matchmaking topic from a session id + optional password.
+ * With a password, the topic is a different value entirely, so peers who omit or
+ * mistype it land in a separate empty swarm and cannot observe the real room
+ * (no peer counts, chats, or ciphertext).
+ * @param {string} sessionId
+ * @param {string} [password]
+ * @returns {Promise<string>}
+ */
+export async function deriveTopic(sessionId, password) {
+  const pw = String(password || "");
+  if (!pw) return sessionId;
+  const input = new TextEncoder().encode(
+    `${APP_ID}:topic:${sessionId}:${pw}`,
+  );
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", input));
+  return `t_${toBase64Url(digest).slice(0, 32)}`;
+}
+
+/**
+ * Derive a room-wide AES-GCM key from the password (used to encrypt broadcast
+ * frames). Returns null when no password is set.
+ * @param {string} sessionId
+ * @param {string} [password]
+ * @returns {Promise<CryptoKey | null>}
+ */
+export async function deriveRoomKey(sessionId, password) {
+  const pw = String(password || "");
+  if (!pw) return null;
+  const ikm = new TextEncoder().encode(
+    `${APP_ID}:roomkey:${sessionId}:${pw}`,
+  );
+  const hkdf = await crypto.subtle.importKey("raw", ikm, "HKDF", false, [
+    "deriveKey",
+  ]);
+  return crypto.subtle.deriveKey(
+    {
+      name: "HKDF",
+      hash: "SHA-256",
+      salt: new TextEncoder().encode(`${APP_ID}:roomkey:salt`),
+      info: new TextEncoder().encode("room-broadcast"),
+    },
+    hkdf,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+/**
  * Deterministic DM id for a pair of peer ids.
  * @param {string} peerA
  * @param {string} peerB
