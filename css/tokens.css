@@ -33,6 +33,11 @@
   --name-3: #d48b1f;
   --name-4: #8b6bc7;
 
+  --scrollbar-thumb: rgba(0, 0, 0, 0.22);
+  --scrollbar-thumb-hover: rgba(0, 0, 0, 0.34);
+  --scrollbar-thumb-light: rgba(255, 255, 255, 0.32);
+  --scrollbar-thumb-light-hover: rgba(255, 255, 255, 0.5);
+
   --radius-bubble: 12px;
   --sidebar-width: 340px;
   --header-height: 56px;

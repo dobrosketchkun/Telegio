@@ -435,6 +435,10 @@ export class ChatSession {
   dispatchHostAction(action) {
     if (!this.hostState || this.sessionEnded) return;
     if (this.role === "host") {
+      const groupsBefore =
+        action.type === "create-group"
+          ? new Set(Object.keys(this.hostState.groups || {}))
+          : null;
       const result = applyHost(this.hostState, action, {
         actorPeerId: this.selfPeerId,
       });
@@ -460,6 +464,14 @@ export class ChatSession {
         this._send(encodeFrame("session-ended", { reason: "ended" }));
       }
       this.hooks.onChange();
+      if (groupsBefore) {
+        // Newly minted group id (host mints synchronously) so the caller can
+        // auto-open the group the local user just created.
+        const createdId = Object.keys(this.hostState.groups).find(
+          (id) => !groupsBefore.has(id),
+        );
+        return createdId || undefined;
+      }
       return;
     }
 

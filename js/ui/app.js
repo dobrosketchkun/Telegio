@@ -117,6 +117,8 @@ let modalConfirm = null;
 let replyToId = null;
 /** @type {{ chatId: string, messageId: string } | null} */
 let editing = null;
+/** @type {{ known: Set<string>, at: number } | null} */
+let pendingGroupSelect = null;
 /** @type {Record<string, number>} */
 const unread = Object.create(null);
 /** @type {Map<string, Set<string>>} */
@@ -305,6 +307,24 @@ function paint() {
   }
 
   trackUnread(store);
+
+  // Guest creator: auto-open the group we just created once it arrives from host.
+  if (pendingGroupSelect && store.hostState?.groups) {
+    const found = Object.values(store.hostState.groups).find(
+      (g) =>
+        g.createdBy === store.selfPeerId &&
+        !pendingGroupSelect.known.has(g.id),
+    );
+    if (found) {
+      activeChatId = found.id;
+      unread[found.id] = 0;
+      clearReply();
+      clearEdit();
+      pendingGroupSelect = null;
+    } else if (Date.now() - pendingGroupSelect.at > 15000) {
+      pendingGroupSelect = null;
+    }
+  }
 
   const ended = mode === "online" ? session?.sessionEnded : false;
   const asHost =
@@ -543,6 +563,20 @@ function paint() {
     els.sessionLabel.title = asHost && !ended ? "Rename session" : "Session";
   }
   updateJumpFab();
+}
+
+let paintScheduled = false;
+/**
+ * Coalesce bursts of network-driven onChange events into a single repaint per frame,
+ * so acks/presence/media-chunk traffic can't cause a storm of full repaints.
+ */
+function schedulePaint() {
+  if (paintScheduled) return;
+  paintScheduled = true;
+  requestAnimationFrame(() => {
+    paintScheduled = false;
+    paint();
+  });
 }
 
 function reactToMessage(messageId, emoji) {
@@ -1014,7 +1048,7 @@ async function startOnlineHost(displayName, title, resume) {
     onChange: () => {
       if (session?.sessionEnded) clearResume();
       else persistResume();
-      paint();
+      schedulePaint();
     },
     onStatus: (s) => {
       if (els.connStatus) els.connStatus.textContent = s;
@@ -1061,7 +1095,7 @@ async function startOnlineGuest(displayName, sessionId, resume) {
     onChange: () => {
       if (session?.sessionEnded) clearResume();
       else persistResume();
-      paint();
+      schedulePaint();
     },
     onStatus: (s) => {
       if (els.connStatus) els.connStatus.textContent = s;
@@ -1102,7 +1136,7 @@ async function startPermanentRoom(displayName, roomId, resume) {
     onChange: () => {
       if (session?.sessionEnded) clearResume();
       else persistResume();
-      paint();
+      schedulePaint();
     },
     onStatus: (s) => {
       if (els.connStatus) els.connStatus.textContent = s;
@@ -1287,12 +1321,26 @@ function openNewGroupModal() {
       const memberPeerIds = [
         ...els.modalBody.querySelectorAll('input[name="group-peer"]:checked'),
       ].map((el) => el.value);
-      session.dispatchHostAction({
+      const knownBefore = new Set(
+        Object.keys(session.hostState?.groups || {}),
+      );
+      const createdId = session.dispatchHostAction({
         type: "create-group",
         title,
         memberPeerIds,
       });
       closeModal();
+      if (typeof createdId === "string") {
+        // Host mints the id synchronously — open it right away.
+        activeChatId = createdId;
+        unread[createdId] = 0;
+        clearReply();
+        clearEdit();
+      } else {
+        // Guest creator: the group id only exists after the host's create event
+        // round-trips; select it once it lands (see paint()).
+        pendingGroupSelect = { known: knownBefore, at: Date.now() };
+      }
       paint();
     },
     "Create",

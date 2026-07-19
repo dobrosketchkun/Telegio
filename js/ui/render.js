@@ -159,11 +159,13 @@ export function renderThread(
     `;
     headerEl.querySelector(".chat-header__sub").textContent =
       opts.subtitle || "Create a DM or group to start";
+    headerEl.dataset.sig = "";
     messagesEl.innerHTML = `
       <div class="empty">
         <div class="empty__card">Pick a chat from the list to view messages.</div>
       </div>
     `;
+    messagesEl.dataset.threadId = "";
     return;
   }
 
@@ -180,54 +182,71 @@ export function renderThread(
     title = other?.displayName || otherId || "DM";
   }
 
-  headerEl.innerHTML = `
-    <div class="chat-header__left">
-      <button type="button" class="btn btn--small chat-header__back" id="chat-back" aria-label="Back to chats" hidden>←</button>
-      <div class="avatar avatar--g${hashHue(chat.id)}" style="width:42px;height:42px;font-size:15px"></div>
-      <div class="chat-header__meta">
-        <h1 class="chat-header__title"></h1>
-        <p class="chat-header__sub"></p>
-      </div>
-    </div>
-    <div class="chat-header__actions"></div>
-  `;
-  headerEl.querySelector(".avatar").textContent = initials(title);
-  headerEl.querySelector(".chat-header__title").textContent = title;
-  headerEl.querySelector(".chat-header__sub").textContent = sub;
-
-  const backBtn = headerEl.querySelector("#chat-back");
-  if (backBtn && typeof opts.onBack === "function") {
-    backBtn.hidden = false;
-    backBtn.addEventListener("click", () => opts.onBack());
-  }
-
-  const actions = headerEl.querySelector(".chat-header__actions");
-  if (
+  // —— Header: only rebuild when something visible changed (avoids recreating
+  // buttons/menus on every network event). ——
+  const canAdd =
     kind === "group" &&
     !opts.sessionEnded &&
-    typeof opts.onAddMembers === "function"
-  ) {
-    const add = document.createElement("button");
-    add.type = "button";
-    add.className = "btn btn--small";
-    add.textContent = "Add members";
-    add.addEventListener("click", () => opts.onAddMembers());
-    actions.append(add);
-  }
-  if (
+    typeof opts.onAddMembers === "function";
+  const canDeleteGroup =
     kind === "group" &&
     opts.isHost &&
     !opts.sessionEnded &&
-    typeof opts.onDeleteGroup === "function"
-  ) {
-    const del = document.createElement("button");
-    del.type = "button";
-    del.className = "btn btn--small";
-    del.textContent = "Delete group";
-    del.addEventListener("click", () => opts.onDeleteGroup());
-    actions.append(del);
+    typeof opts.onDeleteGroup === "function";
+  const headerSig = [
+    chat.id,
+    title,
+    sub,
+    kind,
+    canAdd ? 1 : 0,
+    canDeleteGroup ? 1 : 0,
+    typeof opts.onBack === "function" ? 1 : 0,
+  ].join("~");
+  if (headerEl.dataset.sig !== headerSig) {
+    headerEl.dataset.sig = headerSig;
+    headerEl.innerHTML = `
+      <div class="chat-header__left">
+        <button type="button" class="btn btn--small chat-header__back" id="chat-back" aria-label="Back to chats" hidden>←</button>
+        <div class="avatar avatar--g${hashHue(chat.id)}" style="width:42px;height:42px;font-size:15px"></div>
+        <div class="chat-header__meta">
+          <h1 class="chat-header__title"></h1>
+          <p class="chat-header__sub"></p>
+        </div>
+      </div>
+      <div class="chat-header__actions"></div>
+    `;
+    headerEl.querySelector(".avatar").textContent = initials(title);
+    headerEl.querySelector(".chat-header__title").textContent = title;
+    headerEl.querySelector(".chat-header__sub").textContent = sub;
+
+    const backBtn = headerEl.querySelector("#chat-back");
+    if (backBtn && typeof opts.onBack === "function") {
+      backBtn.hidden = false;
+      backBtn.addEventListener("click", () => opts.onBack());
+    }
+
+    const actions = headerEl.querySelector(".chat-header__actions");
+    if (canAdd) {
+      const add = document.createElement("button");
+      add.type = "button";
+      add.className = "btn btn--small";
+      add.textContent = "Add members";
+      add.addEventListener("click", () => opts.onAddMembers());
+      actions.append(add);
+    }
+    if (canDeleteGroup) {
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "btn btn--small";
+      del.textContent = "Delete group";
+      del.addEventListener("click", () => opts.onDeleteGroup());
+      actions.append(del);
+    }
   }
 
+  // —— Messages: reconcile keyed rows instead of wiping innerHTML, so unchanged
+  // rows (and especially live <video>/<audio>) survive network-driven repaints. ——
+  const threadChanged = messagesEl.dataset.threadId !== chat.id;
   const prevScroll = {
     top: messagesEl.scrollTop,
     height: messagesEl.scrollHeight,
@@ -235,15 +254,136 @@ export function renderThread(
       messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight <
       80,
   };
+  if (threadChanged) messagesEl.innerHTML = "";
 
-  messagesEl.innerHTML = "";
-  for (const msg of messages) {
+  const existing = new Map();
+  for (const child of Array.from(messagesEl.children)) {
+    if (child.dataset && child.dataset.mid) {
+      existing.set(child.dataset.mid, child);
+    } else {
+      child.remove();
+    }
+  }
+
+  const desired = [];
+  messages.forEach((msg, index) => {
+    const mid = msg.id || `sys:${msg.createdAt || 0}:${index}`;
+    const sig = sigFor(msg);
+    const old = existing.get(mid);
+    let node;
+    if (old && old.dataset.sig === sig) {
+      node = old;
+    } else {
+      node = buildRow(msg);
+      node.dataset.mid = mid;
+      node.dataset.sig = sig;
+      if (old) preservePlayingMedia(old, node);
+    }
+    desired.push(node);
+  });
+
+  const desiredSet = new Set(desired);
+  for (const child of Array.from(messagesEl.children)) {
+    if (!desiredSet.has(child)) child.remove();
+  }
+  desired.forEach((node, i) => {
+    const current = messagesEl.children[i];
+    if (current !== node) messagesEl.insertBefore(node, current || null);
+  });
+
+  messagesEl.dataset.threadId = chat.id;
+
+  if (prevScroll.nearBottom || prevScroll.height < 40 || threadChanged) {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  } else {
+    messagesEl.scrollTop = prevScroll.top;
+  }
+
+  /**
+   * Compact per-message signature: rebuild the row only when one of these changes.
+   * @param {import("../engine.js").Message} msg
+   */
+  function sigFor(msg) {
+    if (msg.kind === "system") return `sys~${msg.text || ""}`;
+    const outgoing = msg.senderPeerId === selfPeerId;
+    const parts = [
+      msg.kind,
+      msg.text || "",
+      msg.editedAt || 0,
+      msg.replyTo || "",
+      msg.forward ? `fwd:${msg.forward.fromName || ""}` : "",
+      msg.sticker ? `st:${msg.sticker.pack}/${msg.sticker.stickerId}` : "",
+      `o:${outgoing ? 1 : 0}`,
+      `t:${msg.createdAt || 0}`,
+    ];
+    const sender = hostState.roster.find((r) => r.peerId === msg.senderPeerId);
+    parts.push(`n:${sender?.displayName || msg.senderPeerId || ""}`);
+    if (msg.mediaIds?.length) {
+      parts.push(
+        "m:" +
+          msg.mediaIds
+            .map((id, i) => {
+              const info = msg.mediaInfo?.[i];
+              const plain =
+                typeof opts.getMediaUrl === "function" && opts.getMediaUrl(id)
+                  ? 1
+                  : 0;
+              const play =
+                typeof opts.getPlayableMediaUrl === "function" &&
+                opts.getPlayableMediaUrl(id, {
+                  size: Number(info?.size) || 0,
+                  mime: info?.mime,
+                  outgoing,
+                })
+                  ? 1
+                  : 0;
+              return `${id}#${plain}${play}`;
+            })
+            .join("|"),
+      );
+      parts.push(
+        "mi:" +
+          (msg.mediaInfo || [])
+            .map(
+              (mi) =>
+                `${mi?.size || 0}/${mi?.mime || ""}/${mi?.fileName || ""}/${
+                  mi?.thumbDataUrl ? 1 : 0
+                }`,
+            )
+            .join("|"),
+      );
+    }
+    if (msg.reactions?.length) {
+      parts.push(
+        "r:" +
+          msg.reactions
+            .map(
+              (r) =>
+                `${r.emoji}:${r.peerIds?.length || 0}:${
+                  r.peerIds?.includes(selfPeerId) ? 1 : 0
+                }`,
+            )
+            .join(","),
+      );
+    }
+    if (outgoing) {
+      const delivered = isFullyDelivered(
+        chat.memberPeerIds,
+        msg.senderPeerId,
+        msg.delivery?.ackedBy || [],
+      );
+      parts.push(`d:${delivered ? 1 : 0}`);
+    }
+    return parts.join("~");
+  }
+
+  /** @param {import("../engine.js").Message} msg */
+  function buildRow(msg) {
     if (msg.kind === "system") {
       const sys = document.createElement("div");
       sys.className = "system-msg";
       sys.textContent = msg.text || "";
-      messagesEl.append(sys);
-      continue;
+      return sys;
     }
 
     const outgoing = msg.senderPeerId === selfPeerId;
@@ -683,13 +823,26 @@ export function renderThread(
     if (toolbar.childNodes.length) bubble.append(toolbar);
 
     row.append(bubble);
-    messagesEl.append(row);
+    return row;
   }
+}
 
-  if (prevScroll.nearBottom || prevScroll.height < 40) {
-    messagesEl.scrollTop = messagesEl.scrollHeight;
-  } else {
-    messagesEl.scrollTop = prevScroll.top;
+/**
+ * When rebuilding a row, keep a currently-playing <video>/<audio> element alive by
+ * transplanting the same DOM node into the freshly built row (moving a node does not
+ * reset media playback), so network-driven repaints never interrupt playback.
+ * @param {HTMLElement} oldRow
+ * @param {HTMLElement} newRow
+ */
+function preservePlayingMedia(oldRow, newRow) {
+  const oldMedia = oldRow.querySelector("video, audio");
+  if (!oldMedia) return;
+  const live =
+    !oldMedia.paused || oldMedia.currentTime > 0 || oldMedia.seeking;
+  if (!live) return;
+  const newMedia = newRow.querySelector(oldMedia.tagName.toLowerCase());
+  if (newMedia && newMedia.src === oldMedia.src) {
+    newMedia.replaceWith(oldMedia);
   }
 }
 

@@ -19,6 +19,72 @@ textarea {
   font: inherit;
 }
 
+/* —— App-themed scrollbars —— */
+.chat-list,
+.messages,
+.modal__list,
+.picker__body,
+.compose__input,
+.picker__strip {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+.chat-list::-webkit-scrollbar,
+.messages::-webkit-scrollbar,
+.modal__list::-webkit-scrollbar,
+.picker__body::-webkit-scrollbar,
+.compose__input::-webkit-scrollbar,
+.picker__strip::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.chat-list::-webkit-scrollbar-track,
+.messages::-webkit-scrollbar-track,
+.modal__list::-webkit-scrollbar-track,
+.picker__body::-webkit-scrollbar-track,
+.compose__input::-webkit-scrollbar-track,
+.picker__strip::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.chat-list::-webkit-scrollbar-thumb,
+.messages::-webkit-scrollbar-thumb,
+.modal__list::-webkit-scrollbar-thumb,
+.picker__body::-webkit-scrollbar-thumb,
+.compose__input::-webkit-scrollbar-thumb,
+.picker__strip::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+
+.chat-list::-webkit-scrollbar-thumb:hover,
+.modal__list::-webkit-scrollbar-thumb:hover,
+.picker__body::-webkit-scrollbar-thumb:hover,
+.compose__input::-webkit-scrollbar-thumb:hover,
+.picker__strip::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: padding-box;
+}
+
+/* Message list floats over the darker chat wallpaper — use a light thumb. */
+.messages {
+  scrollbar-color: var(--scrollbar-thumb-light) transparent;
+}
+
+.messages::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb-light);
+  background-clip: padding-box;
+}
+
+.messages::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-light-hover);
+  background-clip: padding-box;
+}
+
 .app {
   display: flex;
   height: 100%;
