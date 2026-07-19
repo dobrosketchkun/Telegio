@@ -6,6 +6,7 @@ import {
   middleTruncate,
 } from "../media.js";
 import { stickerFileUrl } from "../stickers.js";
+import { cachedStickerUrl, warmStickerUrl } from "../sticker-cache.js";
 import { verifyHandle } from "../tripcode.js";
 import { EMOJI } from "./picker.js";
 import { emojiImg, twemojify } from "./twemoji.js";
@@ -205,6 +206,10 @@ export function renderChatList(root, chats, activeId, unread, onSelect, opts = {
  *   getMediaMime?: (mediaId: string) => string | null,
  *   onOpenMedia?: (mediaId: string, messageId: string) => void,
  *   onDownloadMedia?: (mediaId: string) => void,
+ *   onStickerError?: (pack: string, stickerId: string, senderPeerId?: string) => void,
+ *   onStickerLoaded?: () => void,
+ *   onRefetchSticker?: (pack: string, stickerId: string, senderPeerId?: string) => void,
+ *   requestRepaint?: () => void,
  * }} [opts]
  */
 export function renderThread(
@@ -426,7 +431,11 @@ export function renderThread(
       msg.editedAt || 0,
       msg.replyTo || "",
       msg.forward ? `fwd:${msg.forward.fromName || ""}` : "",
-      msg.sticker ? `st:${msg.sticker.pack}/${msg.sticker.stickerId}` : "",
+      msg.sticker
+        ? `st:${msg.sticker.pack}/${msg.sticker.stickerId}${
+            cachedStickerUrl(msg.sticker.pack, msg.sticker.stickerId) ? ":c" : ""
+          }`
+        : "",
       `o:${outgoing ? 1 : 0}`,
       `t:${msg.createdAt || 0}`,
       `g:${flags?.firstOfRun ? 1 : 0}${flags?.lastOfRun ? 1 : 0}`,
@@ -585,18 +594,34 @@ export function renderThread(
     }
 
     if (msg.kind === "sticker" && msg.sticker) {
+      const { pack, stickerId } = msg.sticker;
       const media = document.createElement("div");
       media.className = "bubble__sticker";
       const img = document.createElement("img");
       img.className = "sticker-img";
-      img.src = stickerFileUrl(msg.sticker.pack, msg.sticker.stickerId);
+      const cached = cachedStickerUrl(pack, stickerId);
+      img.src = cached || stickerFileUrl(pack, stickerId);
       img.alt = "sticker";
       img.loading = "lazy";
+      // A cached blob URL may live in IndexedDB but not yet in memory: warm it
+      // and repaint so this <img> swaps to the local copy.
+      if (!cached) {
+        warmStickerUrl(pack, stickerId).then((url) => {
+          if (url) opts.requestRepaint?.();
+        });
+      }
+      img.addEventListener("load", () => {
+        // A successful load from the site proves we have access — let the session
+        // advertise itself as a relay source for peers who don't.
+        if (!cached) opts.onStickerLoaded?.();
+      });
       img.addEventListener("error", () => {
         const fallback = document.createElement("span");
         fallback.className = "sticker-fallback";
         fallback.textContent = "sticker";
         img.replaceWith(fallback);
+        // Pull the bytes from the sender (or any peer with access) and cache.
+        opts.onStickerError?.(pack, stickerId, msg.senderPeerId);
       });
       media.append(img);
       if (typeof opts.onOpenStickerPack === "function") {
@@ -610,6 +635,7 @@ export function renderThread(
             pack: msg.sticker.pack,
             stickerId: msg.sticker.stickerId,
             emoji: msg.sticker.emoji,
+            senderPeerId: msg.senderPeerId,
           });
         };
         media.addEventListener("click", open);
@@ -923,6 +949,21 @@ export function renderThread(
         actions.push({
           label: "Forward",
           onClick: () => opts.onForward(msg.id),
+        });
+      }
+      if (
+        msg.kind === "sticker" &&
+        msg.sticker &&
+        typeof opts.onRefetchSticker === "function"
+      ) {
+        actions.push({
+          label: "Re-fetch via peer",
+          onClick: () =>
+            opts.onRefetchSticker(
+              msg.sticker.pack,
+              msg.sticker.stickerId,
+              msg.senderPeerId,
+            ),
         });
       }
       if (

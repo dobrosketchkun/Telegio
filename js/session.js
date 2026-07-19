@@ -51,6 +51,8 @@ import {
   isRoomControlFrame,
 } from "./protocol.js";
 import { remapHostPeer } from "./resume.js";
+import { fetchStickerBytes, getPack, upsertPack } from "./stickers.js";
+import { getStickerBlob, putSticker } from "./sticker-cache.js";
 import {
   canRestorePermanentRoom,
   compareHostClaims,
@@ -135,6 +137,10 @@ export class ChatSession {
     this._mediaMeta = new Map();
     /** @type {Set<string>} mediaIds user tapped Download for (or own sends). */
     this._mediaUnlocked = new Set();
+    /** True once we've proven we can reach the sticker site (fetch or CDN load). */
+    this._stickerSiteReachable = false;
+    /** @type {Map<string, { pack: string, stickerId: string, tried: Set<string>, broadcastTimer: ReturnType<typeof setTimeout> | null, giveUpTimer: ReturnType<typeof setTimeout> | null }>} in-flight sticker pulls */
+    this._stickerPulls = new Map();
     /** @type {ReturnType<typeof setTimeout> | null} */
     this._hostGraceTimer = null;
     this.roomMode = "random";
@@ -1603,6 +1609,11 @@ export class ChatSession {
       return;
     }
 
+    if (String(type).startsWith("sticker-") || String(type).startsWith("pack-")) {
+      this._onStickerFrame(type, body, peerId);
+      return;
+    }
+
     if (this.role === "host") {
       this._onHostFrame(type, body, peerId);
     } else {
@@ -2301,7 +2312,7 @@ export class ChatSession {
         lastProgressAt: 0,
       });
       const offerSize = Number(body.size) || 0;
-      if (offerSize) {
+      if (offerSize && !mediaId.startsWith("st:")) {
         this.hooks.onProgress?.(
           `Downloading… 0% · 0 B / ${formatBytes(offerSize)}`,
         );
@@ -2319,7 +2330,7 @@ export class ChatSession {
       if (Number.isFinite(total) && total > 0) inc.total = total;
       const wasMissing = typeof inc.chunks[index] !== "string" || !inc.chunks[index];
       inc.chunks[index] = body.data;
-      if (wasMissing) {
+      if (wasMissing && !mediaId.startsWith("st:")) {
         const now = Date.now();
         if (
           index === 0 ||
@@ -2387,6 +2398,166 @@ export class ChatSession {
     }
   }
 
+  /** UI reports the sticker site is reachable (an <img> loaded from it). */
+  markStickerSiteReachable() {
+    this._stickerSiteReachable = true;
+  }
+
+  /**
+   * Peer-relay fallback for stickers when the sticker site is unreachable here.
+   * Tries the original sender first, then any peer with site access. The actual
+   * bytes ride the encrypted media-* transport keyed by a synthetic `st:` id.
+   * @param {string} pack @param {string} stickerId @param {string} [fromPeerId]
+   */
+  requestSticker(pack, stickerId, fromPeerId) {
+    if (!pack || !stickerId) return;
+    const stId = stickerMediaId(pack, stickerId);
+    if (this._stickerPulls.has(stId)) return; // already in flight
+    const pull = {
+      pack,
+      stickerId,
+      tried: /** @type {Set<string>} */ (new Set()),
+      broadcastTimer: /** @type {ReturnType<typeof setTimeout> | null} */ (null),
+      giveUpTimer: /** @type {ReturnType<typeof setTimeout> | null} */ (null),
+    };
+    this._stickerPulls.set(stId, pull);
+    this._fetching.add(stId); // authorise the incoming media-offer for this id
+    const target =
+      fromPeerId && fromPeerId !== this.selfPeerId ? fromPeerId : null;
+    if (target) {
+      pull.tried.add(target);
+      this._send(encodeFrame("sticker-request", { pack, stickerId }), target);
+      pull.broadcastTimer = setTimeout(
+        () => this._broadcastStickerNeed(stId),
+        2500,
+      );
+    } else {
+      this._broadcastStickerNeed(stId);
+    }
+    pull.giveUpTimer = setTimeout(() => this._endStickerPull(stId), 30_000);
+  }
+
+  /**
+   * Ask a peer (usually the sticker's sender) for a pack's JSON so it can be
+   * cached and rendered without reaching the sticker site.
+   * @param {string} pack @param {string} fromPeerId
+   */
+  requestPack(pack, fromPeerId) {
+    if (!pack || !fromPeerId || fromPeerId === this.selfPeerId) return;
+    this._send(encodeFrame("pack-request", { pack }), fromPeerId);
+  }
+
+  /** @param {string} stId */
+  _broadcastStickerNeed(stId) {
+    const pull = this._stickerPulls.get(stId);
+    if (!pull) return;
+    this._send(
+      encodeFrame("sticker-availability", {
+        pack: pull.pack,
+        stickerId: pull.stickerId,
+      }),
+    );
+  }
+
+  /** @param {string} stId */
+  _endStickerPull(stId) {
+    const pull = this._stickerPulls.get(stId);
+    if (!pull) return;
+    if (pull.broadcastTimer) clearTimeout(pull.broadcastTimer);
+    if (pull.giveUpTimer) clearTimeout(pull.giveUpTimer);
+    this._stickerPulls.delete(stId);
+    this._fetching.delete(stId);
+  }
+
+  /**
+   * Handle sticker/pack relay control frames (both host and guest roles).
+   * @param {string} type @param {object} body @param {string} peerId
+   */
+  async _onStickerFrame(type, body, peerId) {
+    const pack = String(body.pack || "").trim();
+    const stickerId = String(body.stickerId || "").trim();
+
+    if (type === "sticker-request") {
+      if (!pack || !stickerId) return;
+      const stId = stickerMediaId(pack, stickerId);
+      let blob = await getStickerBlob(pack, stickerId);
+      if (!blob) {
+        try {
+          blob = await fetchStickerBytes(pack, stickerId);
+          this._stickerSiteReachable = true;
+          await putSticker(pack, stickerId, blob);
+        } catch {
+          this._send(
+            encodeFrame("sticker-reject", { pack, stickerId }),
+            peerId,
+          );
+          return;
+        }
+      }
+      log("sticker", "serve", stId, "→", peerId, blob.size);
+      this._sendMediaChunks(peerId, stId, blob, {
+        mime: blob.type || "image/webp",
+        size: blob.size,
+      }).catch((e) => logError("sticker", "serve failed", e));
+      return;
+    }
+
+    if (type === "sticker-reject") {
+      const stId = stickerMediaId(pack, stickerId);
+      if (this._stickerPulls.has(stId)) this._broadcastStickerNeed(stId);
+      return;
+    }
+
+    if (type === "sticker-availability") {
+      if (!pack || !stickerId || peerId === this.selfPeerId) return;
+      const have = Boolean(await getStickerBlob(pack, stickerId));
+      if (have || this._stickerSiteReachable) {
+        this._send(
+          encodeFrame("sticker-available", { pack, stickerId }),
+          peerId,
+        );
+      }
+      return;
+    }
+
+    if (type === "sticker-available") {
+      const stId = stickerMediaId(pack, stickerId);
+      const pull = this._stickerPulls.get(stId);
+      if (!pull || pull.tried.has(peerId)) return;
+      pull.tried.add(peerId); // take the first responder
+      this._send(encodeFrame("sticker-request", { pack, stickerId }), peerId);
+      return;
+    }
+
+    if (type === "pack-request") {
+      if (!pack) return;
+      const local = getPack(pack);
+      if (local?.stickers?.length) {
+        this._send(encodeFrame("pack-data", { pack, json: local }), peerId);
+      } else {
+        this._send(encodeFrame("pack-reject", { pack }), peerId);
+      }
+      return;
+    }
+
+    if (type === "pack-data") {
+      if (!pack || !body.json || typeof body.json !== "object") return;
+      try {
+        upsertPack(normalizePackJson(pack, body.json));
+      } catch (e) {
+        warn("sticker", "bad pack-data", e);
+        return;
+      }
+      this.hooks.onPackData?.(pack);
+      this.hooks.onChange();
+      return;
+    }
+
+    if (type === "pack-reject") {
+      this.hooks.onPackUnavailable?.(pack);
+    }
+  }
+
   /**
    * Assemble only when every chunk index is present; never skip gaps.
    * @param {string} mediaId
@@ -2420,6 +2591,21 @@ export class ChatSession {
         throw new Error(
           `Media size mismatch (${blob.size} ≠ ${expected})`,
         );
+      }
+
+      if (mediaId.startsWith(STICKER_MEDIA_PREFIX)) {
+        const { pack, stickerId } = parseStickerMediaId(mediaId);
+        putSticker(pack, stickerId, blob)
+          .then(() => this.hooks.onChange())
+          .catch((e) => warn("sticker", "cache write failed", e));
+        this._endStickerPull(mediaId);
+        this._incoming.delete(mediaId);
+        this._send(
+          encodeFrame("media-complete", { mediaId, ok: true }),
+          peerId,
+        );
+        log("sticker", "cached from peer", mediaId, blob.size, `${total} chunks`);
+        return true;
       }
 
       /** @type {MediaEntry} */
@@ -2754,4 +2940,44 @@ function classifyMediaBatch(files) {
     throw new Error(`Album max ${MAX_ALBUM_ITEMS} images`);
   }
   return { files: images, mediaKind: "image" };
+}
+
+/** Synthetic media id prefix used to route sticker byte transfers to the cache. */
+const STICKER_MEDIA_PREFIX = "st:";
+
+/**
+ * pack/id are joined with a NUL separator so ids containing "/" or ":" (base64url
+ * sticker ids) never collide.
+ * @param {string} pack @param {string} stickerId
+ */
+function stickerMediaId(pack, stickerId) {
+  return `${STICKER_MEDIA_PREFIX}${pack}\u0000${stickerId}`;
+}
+
+/** @param {string} id @returns {{ pack: string, stickerId: string }} */
+function parseStickerMediaId(id) {
+  const rest = id.slice(STICKER_MEDIA_PREFIX.length);
+  const nul = rest.indexOf("\u0000");
+  return nul < 0
+    ? { pack: rest, stickerId: "" }
+    : { pack: rest.slice(0, nul), stickerId: rest.slice(nul + 1) };
+}
+
+/**
+ * Coerce a peer-relayed pack payload into the local StickerPack shape.
+ * @param {string} pack @param {any} json
+ */
+function normalizePackJson(pack, json) {
+  const stickers = Array.isArray(json.stickers) ? json.stickers : [];
+  return {
+    name: String(json.name || pack),
+    title: String(json.title || pack),
+    stickers: stickers.map((s) => ({
+      id: String(s.id),
+      emoji: s.emoji || "",
+      file_url: String(s.file_url || ""),
+      thumbnail_url: String(s.thumbnail_url || ""),
+    })),
+    addedAt: Date.now(),
+  };
 }

@@ -53,6 +53,7 @@ import {
   getPack,
   stickerFileUrl,
 } from "../stickers.js";
+import { cachedStickerUrl } from "../sticker-cache.js";
 import { addPacksFromText, createPicker } from "./picker.js";
 import { renderChatList, renderThread } from "./render.js";
 
@@ -134,6 +135,8 @@ let sendingMedia = false;
 let activeChatId = null;
 /** @type {null | (() => void)} */
 let modalConfirm = null;
+/** Pack currently shown in the sticker modal, so peer-relayed packs can refresh it. @type {{ pack: string, stickerId?: string, emoji?: string, senderPeerId?: string } | null} */
+let activePackModal = null;
 /** @type {string | null} */
 let replyToId = null;
 /** @type {{ chatId: string, messageId: string } | null} */
@@ -492,6 +495,20 @@ function paint() {
       onReact: (messageId, emoji) => reactToMessage(messageId, emoji),
       onForward: (messageId) => openForwardModal(messageId),
       onOpenStickerPack: (ref) => openStickerPackModal(ref),
+      onStickerLoaded: () => {
+        if (mode === "online" && session) session.markStickerSiteReachable();
+      },
+      onStickerError: (pack, stickerId, senderPeerId) => {
+        if (mode === "online" && session) {
+          session.requestSticker(pack, stickerId, senderPeerId);
+        }
+      },
+      onRefetchSticker: (pack, stickerId, senderPeerId) => {
+        if (mode === "online" && session) {
+          session.requestSticker(pack, stickerId, senderPeerId);
+          showBanner("Requesting sticker from a peer…", true);
+        }
+      },
       onBack: () => {
         activeChatId = null;
         clearReply();
@@ -1212,6 +1229,8 @@ async function startOnlineHost(displayName, title, resume, password, tripcode) {
     },
     onError: (m) => showBanner(m, false),
     onProgress: (label) => setUploadStatus(label || ""),
+    onPackData: (pack) => onRelayedPack(pack),
+    onPackUnavailable: (pack) => onPackUnavailable(pack),
   });
   enterAppShell({ badge: "Host", status: "Connecting…" });
   try {
@@ -1263,6 +1282,8 @@ async function startOnlineGuest(displayName, sessionId, resume, password, tripco
     },
     onError: (m) => showBanner(m, false),
     onProgress: (label) => setUploadStatus(label || ""),
+    onPackData: (pack) => onRelayedPack(pack),
+    onPackUnavailable: (pack) => onPackUnavailable(pack),
   });
   enterAppShell({ badge: "Guest", status: "Connecting…" });
   try {
@@ -1316,6 +1337,8 @@ async function startPermanentRoom(displayName, roomId, resume, password, tripcod
     },
     onError: (m) => showBanner(m, false),
     onProgress: (label) => setUploadStatus(label || ""),
+    onPackData: (pack) => onRelayedPack(pack),
+    onPackUnavailable: (pack) => onPackUnavailable(pack),
   });
   enterAppShell({ badge: "Room", status: "Looking for room" });
   try {
@@ -1402,6 +1425,7 @@ function openAddMembersModal() {
 function closeModal() {
   els.modal.hidden = true;
   modalConfirm = null;
+  activePackModal = null;
   els.modalBody.innerHTML = "";
   if (els.modalOk) {
     els.modalOk.hidden = false;
@@ -1477,6 +1501,12 @@ function openStickerPackModal(ref) {
     return;
   }
 
+  activePackModal = {
+    pack: ref.pack,
+    stickerId: ref.stickerId,
+    emoji: ref.emoji,
+    senderPeerId: ref.senderPeerId,
+  };
   openModal(
     ref.pack,
     (body) => {
@@ -1491,44 +1521,88 @@ function openStickerPackModal(ref) {
   if (els.modalOk) els.modalOk.disabled = true;
 
   fetchPack(ref.pack)
-    .then((pack) => {
-      els.modalTitle.textContent = pack.title || pack.name;
-      els.modalBody.innerHTML = "";
-      els.modalBody.append(buildStickerModalGrid(pack));
-      if (els.modalOk) els.modalOk.disabled = false;
-      modalConfirm = async () => {
-        if (els.modalOk) els.modalOk.disabled = true;
-        const result = await addPacks([pack.name]);
-        if (result.ok.length) {
-          showBanner(`Added ${pack.title || pack.name}`, true);
-          picker.focusPack(result.ok);
-        } else {
-          showBanner("Could not add pack", false);
-        }
-        closeModal();
-      };
-    })
+    .then((pack) => showPackInModal(pack))
     .catch(() => {
-      els.modalBody.innerHTML = "";
-      const wrap = document.createElement("div");
-      wrap.className = "sticker-modal-grid";
-      const cell = document.createElement("div");
-      cell.className = "sticker-modal-cell";
-      const img = document.createElement("img");
-      img.src = stickerFileUrl(ref.pack, ref.stickerId);
-      img.alt = ref.emoji || "sticker";
-      img.addEventListener("error", () => {
-        img.replaceWith(document.createTextNode(ref.emoji || "?"));
-      });
-      cell.append(img);
-      wrap.append(cell);
-      els.modalBody.append(wrap);
-      const note = document.createElement("p");
-      note.className = "modal__note";
-      note.textContent = "Couldn't load this pack (offline?).";
-      els.modalBody.append(note);
-      if (els.modalOk) els.modalOk.hidden = true;
+      // Our network can't reach the sticker site: ask the peer who sent this
+      // sticker to relay the pack JSON (their images then arrive per-sticker).
+      if (mode === "online" && session && ref.senderPeerId) {
+        session.requestPack(ref.pack, ref.senderPeerId);
+        els.modalBody.innerHTML = "";
+        const note = document.createElement("p");
+        note.className = "modal__note";
+        note.textContent = "Fetching pack from a peer…";
+        els.modalBody.append(note);
+        if (els.modalOk) els.modalOk.disabled = true;
+        return;
+      }
+      renderPackModalUnavailable(ref);
     });
+}
+
+/**
+ * Render a resolved pack (network or peer-relayed) into the open sticker modal.
+ * @param {{ name: string, title?: string, stickers: any[] }} pack
+ */
+function showPackInModal(pack) {
+  els.modalTitle.textContent = pack.title || pack.name;
+  els.modalBody.innerHTML = "";
+  els.modalBody.append(buildStickerModalGrid(pack));
+  if (els.modalOk) {
+    els.modalOk.hidden = false;
+    els.modalOk.disabled = false;
+  }
+  modalConfirm = async () => {
+    if (els.modalOk) els.modalOk.disabled = true;
+    const result = await addPacks([pack.name]);
+    if (result.ok.length) {
+      showBanner(`Added ${pack.title || pack.name}`, true);
+      picker.focusPack(result.ok);
+    } else {
+      showBanner("Could not add pack", false);
+    }
+    closeModal();
+  };
+}
+
+/** @param {{ pack: string, stickerId: string, emoji?: string }} ref */
+function renderPackModalUnavailable(ref) {
+  els.modalBody.innerHTML = "";
+  const wrap = document.createElement("div");
+  wrap.className = "sticker-modal-grid";
+  const cell = document.createElement("div");
+  cell.className = "sticker-modal-cell";
+  const img = document.createElement("img");
+  const cached = cachedStickerUrl(ref.pack, ref.stickerId);
+  img.src = cached || stickerFileUrl(ref.pack, ref.stickerId);
+  img.alt = ref.emoji || "sticker";
+  img.addEventListener("error", () => {
+    img.replaceWith(document.createTextNode(ref.emoji || "?"));
+  });
+  cell.append(img);
+  wrap.append(cell);
+  els.modalBody.append(wrap);
+  const note = document.createElement("p");
+  note.className = "modal__note";
+  note.textContent = "Couldn't load this pack (no peer has it).";
+  els.modalBody.append(note);
+  if (els.modalOk) els.modalOk.hidden = true;
+}
+
+/** A peer relayed a pack's JSON; refresh the modal if it's waiting on it. */
+function onRelayedPack(pack) {
+  if (activePackModal?.pack !== pack) return;
+  const relayed = getPack(pack);
+  if (relayed?.stickers?.length) showPackInModal(relayed);
+}
+
+/** A peer reported it can't supply the pack we asked for. */
+function onPackUnavailable(pack) {
+  if (activePackModal?.pack !== pack) return;
+  renderPackModalUnavailable({
+    pack,
+    stickerId: activePackModal.stickerId || "",
+    emoji: activePackModal.emoji || "",
+  });
 }
 
 function openNewDmModal() {

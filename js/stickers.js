@@ -21,6 +21,36 @@ const PACK_JSON_FETCHERS = [
 ];
 
 /**
+ * Fetch the raw sticker image bytes so they can be relayed to a peer whose
+ * network cannot reach the sticker site. Uses the same CORS-proxy fallbacks as
+ * pack JSON. Throws when the bytes are unreachable from here too.
+ * @param {string} pack @param {string} stickerId
+ * @returns {Promise<Blob>}
+ */
+export async function fetchStickerBytes(pack, stickerId) {
+  const url = stickerFileUrl(pack, stickerId);
+  /** @type {unknown} */
+  let lastError = null;
+  for (const wrap of PACK_JSON_FETCHERS) {
+    try {
+      const res = await fetch(wrap(url));
+      if (!res.ok) {
+        lastError = new Error(`HTTP ${res.status}`);
+        continue;
+      }
+      const blob = await res.blob();
+      if (blob && blob.size > 0) return blob;
+      lastError = new Error("Empty sticker");
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  const msg =
+    lastError instanceof Error ? lastError.message : String(lastError || "");
+  throw new Error(msg || "Sticker fetch failed");
+}
+
+/**
  * @typedef {{ id: string, emoji?: string, file_url: string, thumbnail_url: string }} StickerEntry
  * @typedef {{ name: string, title: string, stickers: StickerEntry[], addedAt: number }} StickerPack
  * @typedef {{ pack: string, stickerId: string, emoji?: string }} StickerRef

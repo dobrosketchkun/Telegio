@@ -1515,6 +1515,19 @@ body.is-resizing {
   background: transparent !important;
   box-shadow: none !important;
   padding: 2px;
+  /* Stickers have no filled bubble — kill the Telegram-style corner tail. */
+  border-radius: 0 !important;
+}
+
+.bubble--sticker.bubble--tail::before {
+  display: none;
+}
+
+/* Meta sits on the wallpaper, so the light bubble-green is unreadable. */
+.bubble--sticker .bubble__meta,
+.bubble--sticker .checks,
+.bubble--sticker .checks--double {
+  color: rgba(0, 0, 0, 0.55) !important;
 }
 
 .bubble__sticker {
