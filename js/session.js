@@ -52,6 +52,7 @@ import {
   prepareFile,
   prepareVideo,
 } from "./media.js";
+import { persistMedia, loadAllMedia, loadMedia } from "./media-cache.js";
 import {
   decodeFrame,
   encodeFrame,
@@ -139,6 +140,10 @@ export class ChatSession {
     this._hostHint = "";
     /** @type {Map<string, MediaEntry>} blobs this peer holds (own sends + P2P downloads) */
     this.localMedia = new Map();
+    /** Peers already asked for a given mediaId this fetch cycle. */
+    this._mediaTried = new Map();
+    /** mediaIds the user explicitly tapped Download for (surface errors). */
+    this._mediaForce = new Set();
     /** @type {Map<string, { meta: object, chunks: string[], from: string }>} */
     this._incoming = new Map();
     /** @type {Set<string>} */
@@ -229,11 +234,45 @@ export class ChatSession {
   /**
    * @param {string} mediaId
    * @param {MediaEntry} entry
+   * @param {{ skipPersist?: boolean }} [opts]
    */
-  putLocalMedia(mediaId, entry) {
+  putLocalMedia(mediaId, entry, opts = {}) {
     const prev = this.localMedia.get(mediaId);
     if (prev?.objectUrl) URL.revokeObjectURL(prev.objectUrl);
     this.localMedia.set(mediaId, { ...entry, objectUrl: undefined });
+    if (!opts.skipPersist && entry?.blob) {
+      persistMedia(mediaId, entry).catch((err) =>
+        warn("media", "persist failed", mediaId, err),
+      );
+    }
+  }
+
+  /** Reload IndexedDB media after F5 so own posts and prior downloads still render. */
+  async _hydrateMediaCache() {
+    try {
+      const all = await loadAllMedia();
+      let n = 0;
+      for (const [id, entry] of all) {
+        if (this.localMedia.has(id)) continue;
+        this.putLocalMedia(id, entry, { skipPersist: true });
+        if (entry.senderPeerId === this.selfPeerId) this.unlockMedia(id);
+        const meta = this._mediaMeta.get(id) || {};
+        this._mediaMeta.set(id, {
+          ...meta,
+          size: entry.size || meta.size || 0,
+          mime: entry.mime || meta.mime,
+          duration: entry.duration ?? meta.duration,
+          senderPeerId: entry.senderPeerId || meta.senderPeerId,
+        });
+        n++;
+      }
+      if (n) {
+        log("media", "hydrated from disk", n);
+        this.hooks.onChange();
+      }
+    } catch (err) {
+      warn("media", "hydrate failed", err);
+    }
   }
 
   get roster() {
@@ -325,6 +364,7 @@ export class ChatSession {
     log("host", "invite", this.inviteUrl);
 
     await this._joinRoom(joinRoom, sessionId);
+    await this._hydrateMediaCache();
     this.hooks.onStatus(this._statusLabel());
     this.hooks.onChange();
     return this;
@@ -353,6 +393,7 @@ export class ChatSession {
     log("guest", "joining", { selfId, sessionId, displayName });
 
     await this._joinRoom(joinRoom, sessionId);
+    await this._hydrateMediaCache();
     this._sendHello(this._hostHint || undefined).catch((err) =>
       logError("guest", "initial hello failed", err),
     );
@@ -400,6 +441,7 @@ export class ChatSession {
       this.hostState = opts.resume.hostState;
     }
     await this._joinRoom(joinRoom, sessionId);
+    await this._hydrateMediaCache();
     if (
       canRestore &&
       opts.resume?.role === "host" &&
@@ -912,21 +954,27 @@ export class ChatSession {
   }
 
   /**
-   * Pull missing media P2P from the original sender (roster peer).
-   * Host is not a media CDN — only roster/admin + message relay.
-   * Large videos skip until force (Download tap).
+   * Pull missing media P2P from the original sender (roster peer), falling back
+   * to any connected peer that may have cached it. Disk cache is checked first
+   * so F5 restores already-seen media without a network round-trip.
    * @param {string[]} mediaIds
    * @param {{ force?: boolean, sizes?: Record<string, number>, mimes?: Record<string, string>, senders?: Record<string, string> }} [opts]
    */
   ensureMedia(mediaIds, opts = {}) {
     for (const id of mediaIds || []) {
       if (!id) continue;
-      if (opts.force) this.unlockMedia(id);
+      if (opts.force) {
+        this.unlockMedia(id);
+        this._mediaForce.add(id);
+      }
       const meta = this._mediaMeta.get(id);
       const knownSize = opts.sizes?.[id] ?? meta?.size ?? 0;
       const mime = String(opts.mimes?.[id] || meta?.mime || "").toLowerCase();
       const senderPeerId =
         opts.senders?.[id] || meta?.senderPeerId || undefined;
+      if (senderPeerId && !meta?.senderPeerId) {
+        this._mediaMeta.set(id, { ...(meta || {}), senderPeerId, size: knownSize, mime });
+      }
       const largeLocked =
         isDeferredTransferMime(mime) &&
         isDeferredPlayableSize(knownSize) &&
@@ -942,32 +990,81 @@ export class ChatSession {
       }
       if (this._fetching.has(id)) continue;
 
-      const target = senderPeerId;
-      if (!target || target === this.selfPeerId) {
-        if (opts.force) {
-          this.hooks.onError(
-            "Media is only on the sender’s device — they may be offline.",
-          );
-        }
-        continue;
-      }
-      if (!this.connectedPeers.has(target)) {
-        if (opts.force) {
-          this.hooks.onError(
-            "Sender is offline — cannot download media right now.",
-          );
-        }
-        continue;
-      }
-
       this._fetching.add(id);
-      log("media", "request P2P", id, "→", target);
-      const sizeLabel = knownSize ? formatBytes(knownSize) : "";
-      this.hooks.onProgress?.(
-        sizeLabel ? `Downloading… 0% · 0 B / ${sizeLabel}` : "Downloading…",
-      );
-      this._send(encodeFrame("media-request", { mediaId: id }), target);
+      this._ensureMediaOne(id, {
+        force: Boolean(opts.force),
+        knownSize,
+        senderPeerId,
+      }).catch((err) => {
+        this._fetching.delete(id);
+        warn("media", "ensure failed", id, err);
+      });
     }
+  }
+
+  /**
+   * @param {string} id
+   * @param {{ force: boolean, knownSize: number, senderPeerId?: string }} opts
+   */
+  async _ensureMediaOne(id, opts) {
+    if (this.localMedia.has(id)) {
+      this._fetching.delete(id);
+      return;
+    }
+    const cached = await loadMedia(id);
+    if (cached?.blob) {
+      this.putLocalMedia(id, cached, { skipPersist: true });
+      if (cached.senderPeerId === this.selfPeerId || opts.force) {
+        this.unlockMedia(id);
+      }
+      this._fetching.delete(id);
+      this._mediaTried.delete(id);
+      this.hooks.onProgress?.("");
+      this.hooks.onChange();
+      return;
+    }
+
+    const tried = this._mediaTried.get(id) || new Set();
+    this._mediaTried.set(id, tried);
+    const target = this._pickMediaPeer(id, opts.senderPeerId, tried);
+    if (!target) {
+      this._fetching.delete(id);
+      this.hooks.onProgress?.("");
+      if (opts.force) {
+        this.hooks.onError(
+          opts.senderPeerId === this.selfPeerId || tried.size === 0
+            ? "Media is only on the sender’s device — they may be offline or refreshed without a local cache."
+            : `Unknown media. ${MEDIA_TURN_HINT}`,
+        );
+      }
+      return;
+    }
+
+    tried.add(target);
+    log("media", "request P2P", id, "→", target);
+    const sizeLabel = opts.knownSize ? formatBytes(opts.knownSize) : "";
+    this.hooks.onProgress?.(
+      sizeLabel ? `Downloading… 0% · 0 B / ${sizeLabel}` : "Downloading…",
+    );
+    this._send(encodeFrame("media-request", { mediaId: id }), target);
+  }
+
+  /**
+   * Prefer the original sender, then any other connected peer not yet tried.
+   * @param {string} mediaId
+   * @param {string | undefined} senderPeerId
+   * @param {Set<string>} tried
+   */
+  _pickMediaPeer(mediaId, senderPeerId, tried) {
+    const prefer = senderPeerId && senderPeerId !== this.selfPeerId ? senderPeerId : null;
+    if (prefer && this.connectedPeers.has(prefer) && !tried.has(prefer)) {
+      return prefer;
+    }
+    for (const peerId of this.connectedPeers) {
+      if (peerId === this.selfPeerId || tried.has(peerId)) continue;
+      return peerId;
+    }
+    return null;
   }
 
   /**
@@ -2350,17 +2447,8 @@ export class ChatSession {
 
     if (type === "media-request") {
       const id = mediaId || String(body.mediaId || "").trim();
-      const entry = this.localMedia.get(id);
-      if (!entry) {
-        this._send(
-          encodeFrame("media-reject", { mediaId: id, reason: "Unknown media" }),
-          peerId,
-        );
-        return;
-      }
-      log("media", "serve P2P", id, "→", peerId);
-      this._streamMediaTo(peerId, id, entry).catch((err) =>
-        logError("media", "stream failed", err),
+      this._serveMediaRequest(peerId, id).catch((err) =>
+        logError("media", "serve failed", err),
       );
       return;
     }
@@ -2368,9 +2456,25 @@ export class ChatSession {
     if (type === "media-reject") {
       const reason = body.reason || "Media rejected";
       this._fetching.delete(mediaId);
+      warn("media", "rejected", mediaId, reason, "from", peerId);
+      const tried = this._mediaTried.get(mediaId) || new Set();
+      tried.add(peerId);
+      this._mediaTried.set(mediaId, tried);
+      const meta = this._mediaMeta.get(mediaId);
+      const next = this._pickMediaPeer(mediaId, meta?.senderPeerId, tried);
+      if (next) {
+        this._fetching.add(mediaId);
+        log("media", "retry P2P", mediaId, "→", next);
+        this._send(encodeFrame("media-request", { mediaId }), next);
+        return;
+      }
       this.hooks.onProgress?.("");
-      warn("media", "rejected", mediaId, reason);
-      this.hooks.onError(`${reason}. ${MEDIA_TURN_HINT}`);
+      // Auto-fetch after F5 often races peers who also lost in-memory blobs;
+      // only surface the scary banner for an explicit Download tap.
+      if (this._mediaForce.has(mediaId)) {
+        this.hooks.onError(`${reason}. ${MEDIA_TURN_HINT}`);
+      }
+      return;
     }
   }
 
@@ -2535,6 +2639,31 @@ export class ChatSession {
   }
 
   /**
+   * Serve a media-request from memory or disk cache.
+   * @param {string} peerId
+   * @param {string} id
+   */
+  async _serveMediaRequest(peerId, id) {
+    let entry = this.localMedia.get(id);
+    if (!entry?.blob) {
+      const cached = await loadMedia(id);
+      if (cached?.blob) {
+        this.putLocalMedia(id, cached, { skipPersist: true });
+        entry = this.localMedia.get(id);
+      }
+    }
+    if (!entry?.blob) {
+      this._send(
+        encodeFrame("media-reject", { mediaId: id, reason: "Unknown media" }),
+        peerId,
+      );
+      return;
+    }
+    log("media", "serve P2P", id, "→", peerId);
+    await this._streamMediaTo(peerId, id, entry);
+  }
+
+  /**
    * Assemble only when every chunk index is present; never skip gaps.
    * @param {string} mediaId
    * @param {string} peerId
@@ -2601,6 +2730,7 @@ export class ChatSession {
       // Any peer (including host) keeps a local copy only — no session-wide media CDN.
       this.putLocalMedia(mediaId, entry);
       this._fetching.delete(mediaId);
+      this._mediaTried.delete(mediaId);
       const largeGated =
         isDeferredTransferMime(entry.mime) &&
         isDeferredPlayableSize(entry.size);

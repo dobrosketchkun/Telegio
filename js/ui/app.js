@@ -184,17 +184,28 @@ function getStore() {
   return null;
 }
 
+let bannerTimer = null;
+
 function showBanner(text, ok) {
   if (!els.bootBanner) return;
   els.bootBanner.hidden = false;
   els.bootBanner.className =
     "boot-banner " + (ok ? "boot-banner--ok" : "boot-banner--err");
   els.bootBanner.textContent = text;
-  if (ok) {
-    setTimeout(() => {
-      els.bootBanner.hidden = true;
-    }, 4000);
-  }
+  els.bootBanner.title = "Click to dismiss";
+  if (bannerTimer) clearTimeout(bannerTimer);
+  bannerTimer = setTimeout(
+    () => {
+      if (els.bootBanner) els.bootBanner.hidden = true;
+    },
+    ok ? 4000 : 7000,
+  );
+}
+
+function dismissBanner() {
+  if (bannerTimer) clearTimeout(bannerTimer);
+  bannerTimer = null;
+  if (els.bootBanner) els.bootBanner.hidden = true;
 }
 
 function currentSessionId() {
@@ -2551,6 +2562,7 @@ function initPasswordReveals() {
   }
 }
 initPasswordReveals();
+els.bootBanner?.addEventListener("click", () => dismissBanner());
 
 if (isFixtureMode()) {
   startFixture();

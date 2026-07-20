@@ -2136,7 +2136,8 @@ body.is-resizing {
   background: rgba(0, 0, 0, 0.75);
   color: #fff;
   max-width: 360px;
-  pointer-events: none;
+  pointer-events: auto;
+  cursor: pointer;
 }
 
 .boot-banner--ok {
