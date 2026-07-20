@@ -483,11 +483,10 @@ textarea {
 
 .sidebar__title.is-editable {
   cursor: pointer;
-  text-decoration: underline dotted;
 }
 
 .sidebar__title.is-editable:hover {
-  opacity: 0.85;
+  color: var(--accent);
 }
 
 .sidebar__hint {
@@ -1547,6 +1546,26 @@ body.is-resizing {
 
 .bubble--sticker.bubble--tail::before {
   display: none;
+}
+
+/* Names sit on the chat wallpaper — bump contrast vs soft bubble colors. */
+.bubble--sticker .bubble__name {
+  text-shadow:
+    0 0 3px rgba(0, 0, 0, 0.55),
+    0 1px 2px rgba(0, 0, 0, 0.45);
+}
+
+.bubble--sticker .bubble__name--c0 { color: #ff8b96; }
+.bubble--sticker .bubble__name--c1 { color: #7ec4ff; }
+.bubble--sticker .bubble__name--c2 { color: #6eefb0; }
+.bubble--sticker .bubble__name--c3 { color: #ffc45c; }
+.bubble--sticker .bubble__name--c4 { color: #c4a6ff; }
+
+.bubble--sticker .trip-badge {
+  color: #d6ebff;
+  text-shadow:
+    0 0 3px rgba(0, 0, 0, 0.55),
+    0 1px 2px rgba(0, 0, 0, 0.45);
 }
 
 /* Meta sits on the wallpaper, so the light bubble-green is unreadable. */
