@@ -31,6 +31,13 @@ import {
   prepareVideo,
 } from "../media.js";
 import {
+  markNotifyPromptSeen,
+  notificationBody,
+  notifyNewMessage,
+  requestPermission,
+  shouldPromptForNotifications,
+} from "../notify.js";
+import {
   isMuted,
   loadPrefs,
   loadUiPrefs,
@@ -192,7 +199,7 @@ function showBanner(text, ok) {
   els.bootBanner.hidden = false;
   els.bootBanner.className =
     "boot-banner " + (ok ? "boot-banner--ok" : "boot-banner--err");
-  els.bootBanner.textContent = text;
+  els.bootBanner.replaceChildren(document.createTextNode(text));
   els.bootBanner.title = "Click to dismiss";
   if (bannerTimer) clearTimeout(bannerTimer);
   bannerTimer = setTimeout(
@@ -207,6 +214,60 @@ function dismissBanner() {
   if (bannerTimer) clearTimeout(bannerTimer);
   bannerTimer = null;
   if (els.bootBanner) els.bootBanner.hidden = true;
+}
+
+/** One-shot soft prompt to enable OS desktop notifications. */
+function maybePromptDesktopNotifications() {
+  if (!els.bootBanner || !shouldPromptForNotifications()) return;
+  if (bannerTimer) clearTimeout(bannerTimer);
+  bannerTimer = null;
+  els.bootBanner.hidden = false;
+  els.bootBanner.className = "boot-banner boot-banner--ok";
+  els.bootBanner.title = "";
+  els.bootBanner.replaceChildren();
+
+  const text = document.createElement("span");
+  text.textContent = "Get desktop alerts for new messages?";
+  const actions = document.createElement("span");
+  actions.className = "boot-banner__actions";
+
+  const enable = document.createElement("button");
+  enable.type = "button";
+  enable.className = "boot-banner__btn";
+  enable.textContent = "Enable";
+  enable.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    dismissBanner();
+    const perm = await requestPermission();
+    if (perm === "granted") {
+      showBanner("Desktop notifications on", true);
+    } else if (perm === "denied") {
+      showBanner("Notifications blocked in browser settings", false);
+    }
+  });
+
+  const later = document.createElement("button");
+  later.type = "button";
+  later.className = "boot-banner__btn boot-banner__btn--ghost";
+  later.textContent = "Not now";
+  later.addEventListener("click", (e) => {
+    e.stopPropagation();
+    markNotifyPromptSeen();
+    dismissBanner();
+  });
+
+  actions.append(enable, later);
+  els.bootBanner.append(text, actions);
+
+  // One-shot: auto-dismiss counts as "Not now" so we do not nag every refresh.
+  bannerTimer = setTimeout(() => {
+    if (els.bootBanner && !els.bootBanner.hidden) {
+      if (els.bootBanner.querySelector(".boot-banner__actions")) {
+        markNotifyPromptSeen();
+      }
+      dismissBanner();
+    }
+  }, 14000);
 }
 
 function currentSessionId() {
@@ -235,9 +296,32 @@ function trackUnread(store) {
     for (const msg of thread.messages) {
       if (seen.has(msg.id)) continue;
       seen.add(msg.id);
-      if (chat.id === activeChatId) continue;
       if (msg.senderPeerId === store.selfPeerId) continue;
-      unread[chat.id] = (unread[chat.id] || 0) + 1;
+      if (msg.kind === "system") continue;
+
+      const viewingThisChat = chat.id === activeChatId && !document.hidden;
+      if (viewingThisChat) continue;
+
+      if (chat.id !== activeChatId) {
+        unread[chat.id] = (unread[chat.id] || 0) + 1;
+      }
+
+      // Tray: background tab, or focused but another chat (Mute already skipped).
+      if (document.hidden || chat.id !== activeChatId) {
+        const chatId = chat.id;
+        notifyNewMessage({
+          chatId,
+          title: chat.title || "Telegio",
+          body: notificationBody(msg),
+          onClick: () => {
+            activeChatId = chatId;
+            unread[chatId] = 0;
+            clearReply();
+            clearEdit();
+            paint();
+          },
+        });
+      }
     }
   }
 }
@@ -1041,6 +1125,8 @@ function enterAppShell({ badge, status, inviteUrl }) {
   } else if (els.inviteBox) {
     els.inviteBox.hidden = true;
   }
+  // Defer so a following status banner (e.g. fixture self-check) can show first.
+  window.setTimeout(() => maybePromptDesktopNotifications(), 4500);
 }
 
 async function startFixture() {
@@ -2735,7 +2821,17 @@ function initPasswordReveals() {
   }
 }
 initPasswordReveals();
-els.bootBanner?.addEventListener("click", () => dismissBanner());
+els.bootBanner?.addEventListener("click", (e) => {
+  if (e.target instanceof Element && e.target.closest("button")) return;
+  // Dismissing the notify prompt without a choice counts as "Not now".
+  if (
+    els.bootBanner?.querySelector(".boot-banner__actions") &&
+    shouldPromptForNotifications()
+  ) {
+    markNotifyPromptSeen();
+  }
+  dismissBanner();
+});
 
 if (isFixtureMode()) {
   startFixture();
