@@ -809,6 +809,23 @@ body.is-resizing {
   opacity: 0.72;
 }
 
+.chat-list__sep {
+  list-style: none;
+  height: 0;
+  margin: 10px 14px 8px;
+  border: 0;
+  border-top: 1px solid var(--border);
+  pointer-events: none;
+}
+
+.chat-list__item--public {
+  opacity: 0.85;
+}
+
+.chat-list__item--public .chat-list__preview {
+  display: none;
+}
+
 .chat-list__item--offline .chat-list__name {
   color: var(--text-secondary);
 }
@@ -1582,6 +1599,26 @@ body.is-resizing {
   font-size: 13px;
   color: var(--text-secondary);
   margin: 10px 2px 0;
+}
+
+.modal__radios {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.modal__radio {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.modal__radio input {
+  accent-color: var(--accent);
 }
 
 .sticker-img {

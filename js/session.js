@@ -20,9 +20,12 @@ import {
   bumpHostRevision,
   createEmptyDmState,
   createHostState,
+  effectNeedsRosterFanout,
+  enrollPeerInEveryoneGroups,
   fanoutPeerIdsForGroup,
   filterHostStateForPeer,
   getHostPeerId,
+  groupModeOf,
   mergeHostSnapshots,
   remapRosterPeer,
   removeRosterPeer,
@@ -1874,6 +1877,9 @@ export class ChatSession {
     if (type === "event") {
       if (!this.hostState) return;
       this.hostState = applyHostEvent(this.hostState, body);
+      if (body.event === "chat-created" && body.chat) {
+        this._prunePublicStubIfNeeded(body.chat);
+      }
       if (body.event === "message-added" && body.message) {
         this._ackGroupMessage(body.chatId || body.message.chatId, body.message);
         this.rememberMediaInfo(body.message);
@@ -2305,9 +2311,19 @@ export class ChatSession {
       }
 
       let targets = [];
-      if (effect.event === "chat-deleted" && effect.memberPeerIds) {
+      // Targeted enroll (Everyone late-join) or explicit memberPeerIds on effect.
+      if (
+        Array.isArray(effect.memberPeerIds) &&
+        effect.memberPeerIds.length &&
+        effect.event === "chat-created"
+      ) {
+        targets = [...effect.memberPeerIds];
+      } else if (effectNeedsRosterFanout(this.hostState, effect)) {
+        targets = this.hostState.roster.map((r) => r.peerId);
+      } else if (effect.event === "chat-deleted" && effect.memberPeerIds) {
         targets = [...effect.memberPeerIds];
       } else if (effect.event === "chat-created" && effect.chat) {
+        // Public stubs use effectNeedsRosterFanout above; history sync stays members-only.
         targets = [...effect.chat.memberPeerIds];
       } else if (effect.event === "session-renamed") {
         targets = [...this.connectedPeers];
@@ -2328,6 +2344,21 @@ export class ChatSession {
   _broadcastRoster() {
     if (!this.hostState) return;
     this._send(encodeFrame("roster", { roster: this.hostState.roster }));
+  }
+
+  /**
+   * After leaving (or receiving a public stub update), drop local message history
+   * so browse-only public rows stay name-only.
+   * @param {import("./engine.js").Chat} chat
+   */
+  _prunePublicStubIfNeeded(chat) {
+    if (!this.hostState || !chat?.id) return;
+    if (groupModeOf(chat) !== "public") return;
+    if (chat.memberPeerIds?.includes(this.selfPeerId)) return;
+    this.hostState = {
+      ...this.hostState,
+      groupMessages: { ...this.hostState.groupMessages, [chat.id]: [] },
+    };
   }
 
   /**
@@ -2919,6 +2950,15 @@ export class ChatSession {
           online: true,
         });
       }
+    }
+
+    // Auto-enroll into Everyone groups (including brand-new peers).
+    const enrolled = enrollPeerInEveryoneGroups(this.hostState, peerId);
+    this.hostState = enrolled.state;
+    if (enrolled.effects.length) {
+      this.hostState = bumpHostRevision(this.hostState);
+      // Apply locally for host UI; wire targeted chat-created to the new peer.
+      this._emitEffects(enrolled.effects, false);
     }
 
     this.hostState = bumpHostRevision(this.hostState);

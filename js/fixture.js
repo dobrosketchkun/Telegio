@@ -178,7 +178,26 @@ export async function buildFixture(pack = null) {
   );
   if (!r.ok) throw new Error(r.error);
   hostState = r.state;
-  const notesId = Object.keys(hostState.groups).find((id) => id !== groupId);
+
+  // Public group (creator only) + Everyone group for mode demos.
+  r = applyHost(
+    hostState,
+    { type: "create-group", title: "Open board", mode: "public" },
+    { actorPeerId: PEERS.mira.peerId },
+  );
+  if (!r.ok) throw new Error(r.error);
+  hostState = r.state;
+  r = applyHost(
+    hostState,
+    { type: "create-group", title: "All hands", mode: "everyone" },
+    { actorPeerId: PEERS.host.peerId },
+  );
+  if (!r.ok) throw new Error(r.error);
+  hostState = r.state;
+
+  const notesId = Object.keys(hostState.groups).find(
+    (id) => hostState.groups[id].title === "Dev notes",
+  );
   r = applyHost(
     hostState,
     {

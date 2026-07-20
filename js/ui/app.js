@@ -221,6 +221,7 @@ function trackUnread(store) {
     store.selfPeerId,
   );
   for (const chat of chats) {
+    if (chat.joined === false) continue; // public browse-only: no notifications
     if (sid && isMuted(sid, chat.id)) continue;
     const thread = getChatThread(store.hostState, store.dmState, chat.id);
     if (!thread) continue;
@@ -476,6 +477,48 @@ function paint() {
           }
         }
       },
+      onJoinGroup: () => {
+        if (!activeChatId) return;
+        if (mode === "online" && session) {
+          session.dispatchHostAction({
+            type: "join-group",
+            chatId: activeChatId,
+          });
+        } else if (mode === "fixture" && fixtureStore) {
+          const r = applyHost(
+            fixtureStore.hostState,
+            { type: "join-group", chatId: activeChatId },
+            { actorPeerId: fixtureStore.selfPeerId },
+          );
+          if (r.ok) {
+            fixtureStore = { ...fixtureStore, hostState: r.state };
+            paint();
+          } else {
+            showBanner(r.error || "Could not join", false);
+          }
+        }
+      },
+      onLeaveGroup: () => {
+        if (!activeChatId) return;
+        if (mode === "online" && session) {
+          session.dispatchHostAction({
+            type: "leave-group",
+            chatId: activeChatId,
+          });
+        } else if (mode === "fixture" && fixtureStore) {
+          const r = applyHost(
+            fixtureStore.hostState,
+            { type: "leave-group", chatId: activeChatId },
+            { actorPeerId: fixtureStore.selfPeerId },
+          );
+          if (r.ok) {
+            fixtureStore = { ...fixtureStore, hostState: r.state };
+            paint();
+          } else {
+            showBanner(r.error || "Could not leave", false);
+          }
+        }
+      },
       onAddMembers: () => openAddMembersModal(),
       onDeleteMessage: (messageId) => {
         if (!activeChatId) return;
@@ -639,15 +682,24 @@ function paint() {
     }
   }
 
-  const canSend = Boolean(thread) && !ended && !sendingMedia;
+  const isGroupMember =
+    !thread ||
+    thread.kind !== "group" ||
+    thread.chat.memberPeerIds.includes(store.selfPeerId);
+  const canSend =
+    Boolean(thread) && !ended && !sendingMedia && isGroupMember;
   els.composeInput.disabled = !canSend;
   els.composeSend.disabled = !canSend;
   if (els.attachBtn) els.attachBtn.disabled = !canSend;
+  if (els.composeForm) {
+    els.composeForm.hidden = Boolean(thread && thread.kind === "group" && !isGroupMember);
+  }
   const rosterOthers = store.hostState.roster.filter(
     (r) => r.peerId !== store.selfPeerId,
   );
   els.btnNewDm.disabled = ended || !rosterOthers.length;
-  els.btnNewGroup.disabled = ended || rosterOthers.length < 1;
+  // Public / Everyone groups can be created alone; private still needs peers in the modal.
+  els.btnNewGroup.disabled = ended;
   if (els.rosterHint) {
     els.rosterHint.hidden = ended || rosterOthers.length > 0 || !asHost;
   }
@@ -1741,13 +1793,35 @@ function openNewGroupModal() {
       titleField.className = "field";
       titleField.innerHTML = `<span>Title</span><input id="group-title" maxlength="48" placeholder="Group name" />`;
       body.append(titleField);
+
+      const modeField = document.createElement("div");
+      modeField.className = "field";
+      modeField.innerHTML = `<span>Type</span>`;
+      const modes = document.createElement("div");
+      modes.className = "modal__radios";
+      modes.innerHTML = `
+        <label class="modal__radio"><input type="radio" name="group-mode" value="private" checked /> Group</label>
+        <label class="modal__radio"><input type="radio" name="group-mode" value="public" /> Public group</label>
+        <label class="modal__radio"><input type="radio" name="group-mode" value="everyone" /> Everyone group</label>
+      `;
+      modeField.append(modes);
+      body.append(modeField);
+
       const hint = document.createElement("p");
-      hint.style.cssText =
-        "font-size:13px;color:var(--text-secondary);margin:0 0 8px";
+      hint.className = "modal__note";
+      hint.id = "group-mode-hint";
       hint.textContent = "Select members (you are included automatically):";
       body.append(hint);
+
       const list = document.createElement("div");
       list.className = "modal__list";
+      list.id = "group-members-list";
+      if (!others.length) {
+        const empty = document.createElement("p");
+        empty.className = "modal__note";
+        empty.textContent = "No other peers yet — use Public or Everyone group.";
+        list.append(empty);
+      }
       for (const p of others) {
         const label = document.createElement("label");
         const input = document.createElement("input");
@@ -1759,31 +1833,56 @@ function openNewGroupModal() {
         list.append(label);
       }
       body.append(list);
+
+      const syncModeUi = () => {
+        const mode =
+          modes.querySelector('input[name="group-mode"]:checked')?.value ||
+          "private";
+        const showMembers = mode === "private";
+        list.hidden = !showMembers;
+        if (mode === "public") {
+          hint.textContent =
+            "Anyone in the session can see the name and join.";
+        } else if (mode === "everyone") {
+          hint.textContent =
+            "Everyone in the session is a member, including people who join later.";
+        } else {
+          hint.textContent =
+            "Select members (you are included automatically):";
+        }
+      };
+      modes.addEventListener("change", syncModeUi);
+      syncModeUi();
     },
     () => {
       const title =
         els.modalBody.querySelector("#group-title")?.value?.trim() || "Group";
+      const mode =
+        els.modalBody.querySelector('input[name="group-mode"]:checked')
+          ?.value || "private";
       const memberPeerIds = [
         ...els.modalBody.querySelectorAll('input[name="group-peer"]:checked'),
       ].map((el) => el.value);
+      if (mode === "private" && memberPeerIds.length < 1) {
+        showBanner("Pick at least one other member, or choose Public / Everyone", false);
+        return;
+      }
       const knownBefore = new Set(
         Object.keys(session.hostState?.groups || {}),
       );
       const createdId = session.dispatchHostAction({
         type: "create-group",
         title,
-        memberPeerIds,
+        mode,
+        memberPeerIds: mode === "private" ? memberPeerIds : [],
       });
       closeModal();
       if (typeof createdId === "string") {
-        // Host mints the id synchronously — open it right away.
         activeChatId = createdId;
         unread[createdId] = 0;
         clearReply();
         clearEdit();
       } else {
-        // Guest creator: the group id only exists after the host's create event
-        // round-trips; select it once it lands (see paint()).
         pendingGroupSelect = { known: knownBefore, at: Date.now() };
       }
       paint();

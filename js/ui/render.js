@@ -1,4 +1,5 @@
 import { VIDEO_AUTO_DOWNLOAD_BYTES } from "../constants.js";
+import { groupModeOf } from "../engine.js";
 import { isFullyDelivered, renderEntities } from "../entities.js";
 import {
   fileIconKind,
@@ -87,7 +88,18 @@ export function renderChatList(root, chats, activeId, unread, onSelect, opts = {
     return;
   }
 
+  let sepInserted = false;
   for (const chat of chats) {
+    const browseOnly = chat.kind === "group" && chat.joined === false;
+    if (browseOnly && !sepInserted) {
+      const sep = document.createElement("li");
+      sep.className = "chat-list__sep";
+      sep.setAttribute("role", "separator");
+      sep.setAttribute("aria-label", "Public groups");
+      root.append(sep);
+      sepInserted = true;
+    }
+
     const li = document.createElement("li");
     const btn = document.createElement("button");
     btn.type = "button";
@@ -95,7 +107,8 @@ export function renderChatList(root, chats, activeId, unread, onSelect, opts = {
       "chat-list__item" +
       (chat.id === activeId ? " is-active" : "") +
       (pinned.has(chat.id) ? " is-pinned" : "") +
-      (muted.has(chat.id) ? " is-muted" : "");
+      (muted.has(chat.id) ? " is-muted" : "") +
+      (browseOnly ? " chat-list__item--public" : "");
     btn.addEventListener("click", () => onSelect(chat.id));
 
     if (chat.offline) btn.classList.add("chat-list__item--offline");
@@ -116,7 +129,7 @@ export function renderChatList(root, chats, activeId, unread, onSelect, opts = {
     `;
     const nameEl = main.querySelector(".chat-list__name");
     nameEl.textContent = chat.title;
-    if (chat.kind === "dm" && chat.trip) {
+    if (!browseOnly && chat.kind === "dm" && chat.trip) {
       const tripId = verifiedTripId(
         chat.tripPeerId,
         chat.trip,
@@ -125,63 +138,81 @@ export function renderChatList(root, chats, activeId, unread, onSelect, opts = {
       if (tripId) nameEl.append(makeTripBadge(tripId));
     }
     const nameIcons = main.querySelector(".chat-list__nameicons");
-    if (muted.has(chat.id)) {
+    if (!browseOnly && muted.has(chat.id)) {
       const mute = document.createElement("span");
       mute.className = "chat-list__icon chat-list__icon--mute";
       mute.innerHTML = ICON_MUTE;
       mute.title = "Muted";
       nameIcons.append(mute);
     }
-    main.querySelector(".chat-list__time").textContent = formatTime(chat.updatedAt);
+    const timeEl = main.querySelector(".chat-list__time");
     const previewEl = main.querySelector(".chat-list__preview");
-    previewEl.textContent = chat.offline
-      ? chat.preview
-        ? `Offline · ${chat.preview}`
-        : "Offline"
-      : chat.preview;
+    if (browseOnly) {
+      timeEl.textContent = "";
+      previewEl.textContent = "";
+      previewEl.hidden = true;
+    } else {
+      timeEl.textContent = formatTime(chat.updatedAt);
+      previewEl.textContent = chat.offline
+        ? chat.preview
+          ? `Offline · ${chat.preview}`
+          : "Offline"
+        : chat.preview;
+    }
 
     const right = document.createElement("div");
     right.className = "chat-list__right";
     const kind = document.createElement("div");
     kind.className = "chat-list__kind";
-    kind.textContent = chat.kind === "dm" ? "DM" : "Group";
+    kind.textContent =
+      chat.kind === "dm"
+        ? "DM"
+        : chat.mode === "everyone"
+          ? "Everyone"
+          : chat.mode === "public"
+            ? "Public"
+            : "Group";
     right.append(kind);
-    const count = muted.has(chat.id) ? 0 : unread[chat.id] || 0;
-    if (count > 0) {
-      const badge = document.createElement("span");
-      badge.className = "unread-badge";
-      badge.textContent = count > 99 ? "99+" : String(count);
-      right.append(badge);
-    } else if (pinned.has(chat.id)) {
-      const pin = document.createElement("span");
-      pin.className = "chat-list__icon chat-list__icon--pin";
-      pin.innerHTML = ICON_PIN;
-      pin.title = "Pinned";
-      right.append(pin);
+    if (!browseOnly) {
+      const count = muted.has(chat.id) ? 0 : unread[chat.id] || 0;
+      if (count > 0) {
+        const badge = document.createElement("span");
+        badge.className = "unread-badge";
+        badge.textContent = count > 99 ? "99+" : String(count);
+        right.append(badge);
+      } else if (pinned.has(chat.id)) {
+        const pin = document.createElement("span");
+        pin.className = "chat-list__icon chat-list__icon--pin";
+        pin.innerHTML = ICON_PIN;
+        pin.title = "Pinned";
+        right.append(pin);
+      }
     }
 
-    const buildChatActions = () => {
-      /** @type {{ label: string, danger?: boolean, onClick: () => void }[]} */
-      const actions = [];
-      if (typeof opts.onTogglePin === "function") {
-        actions.push({
-          label: pinned.has(chat.id) ? "Unpin" : "Pin",
-          onClick: () => opts.onTogglePin(chat.id),
+    if (!browseOnly) {
+      const buildChatActions = () => {
+        /** @type {{ label: string, danger?: boolean, onClick: () => void }[]} */
+        const actions = [];
+        if (typeof opts.onTogglePin === "function") {
+          actions.push({
+            label: pinned.has(chat.id) ? "Unpin" : "Pin",
+            onClick: () => opts.onTogglePin(chat.id),
+          });
+        }
+        if (typeof opts.onToggleMute === "function") {
+          actions.push({
+            label: muted.has(chat.id) ? "Unmute" : "Mute",
+            onClick: () => opts.onToggleMute(chat.id),
+          });
+        }
+        return actions;
+      };
+      if (buildChatActions().length) {
+        attachContextTrigger(btn, (px, py) => {
+          const actions = buildChatActions();
+          if (actions.length) openContextMenu(px, py, { actions });
         });
       }
-      if (typeof opts.onToggleMute === "function") {
-        actions.push({
-          label: muted.has(chat.id) ? "Unmute" : "Mute",
-          onClick: () => opts.onToggleMute(chat.id),
-        });
-      }
-      return actions;
-    };
-    if (buildChatActions().length) {
-      attachContextTrigger(btn, (px, py) => {
-        const actions = buildChatActions();
-        if (actions.length) openContextMenu(px, py, { actions });
-      });
     }
 
     btn.append(av, main, right);
@@ -202,6 +233,8 @@ export function renderChatList(root, chats, activeId, unread, onSelect, opts = {
  *   subtitle?: string,
  *   onDeleteGroup?: () => void,
  *   onAddMembers?: () => void,
+ *   onJoinGroup?: () => void,
+ *   onLeaveGroup?: () => void,
  *   onDeleteMessage?: (messageId: string) => void,
  *   onReply?: (messageId: string) => void,
  *   onEdit?: (messageId: string) => void,
@@ -249,10 +282,21 @@ export function renderThread(
   }
 
   const { chat, messages, kind } = thread;
+  const gMode = kind === "group" ? groupModeOf(chat) : "private";
+  const isMember =
+    kind !== "group" || chat.memberPeerIds.includes(selfPeerId);
+  const browsePublic = kind === "group" && gMode === "public" && !isMember;
+
   let title = chat.title || "Chat";
   let sub =
     kind === "group"
-      ? `${chat.memberPeerIds.length} members`
+      ? browsePublic
+        ? "Public group · not joined"
+        : gMode === "everyone"
+          ? `Everyone group · ${chat.memberPeerIds.length} members`
+          : gMode === "public"
+            ? `Public group · ${chat.memberPeerIds.length} members`
+            : `${chat.memberPeerIds.length} members`
       : "private DM";
 
   let titleTripId = "";
@@ -267,8 +311,22 @@ export function renderThread(
   // buttons/menus on every network event). ——
   const canAdd =
     kind === "group" &&
+    !browsePublic &&
+    gMode !== "everyone" &&
+    isMember &&
     !opts.sessionEnded &&
     typeof opts.onAddMembers === "function";
+  const canJoin =
+    browsePublic &&
+    !opts.sessionEnded &&
+    typeof opts.onJoinGroup === "function";
+  const canLeave =
+    kind === "group" &&
+    gMode === "public" &&
+    isMember &&
+    !opts.isHost &&
+    !opts.sessionEnded &&
+    typeof opts.onLeaveGroup === "function";
   // Kebab Delete group: session host (any group) or the member who created it.
   const canDeleteGroup =
     kind === "group" &&
@@ -280,7 +338,11 @@ export function renderThread(
     title,
     sub,
     kind,
+    gMode,
+    isMember ? 1 : 0,
     canAdd ? 1 : 0,
+    canJoin ? 1 : 0,
+    canLeave ? 1 : 0,
     canDeleteGroup ? 1 : 0,
     typeof opts.onBack === "function" ? 1 : 0,
     `v:${titleTripId}`,
@@ -311,10 +373,24 @@ export function renderThread(
     }
 
     const actions = headerEl.querySelector(".chat-header__actions");
+    if (canJoin) {
+      const joinBtn = document.createElement("button");
+      joinBtn.type = "button";
+      joinBtn.className = "btn btn--primary btn--small";
+      joinBtn.textContent = "Join group";
+      joinBtn.addEventListener("click", () => opts.onJoinGroup());
+      actions.append(joinBtn);
+    }
     /** @type {{ label: string, danger?: boolean, onClick: () => void }[]} */
     const menuItems = [];
     if (canAdd) {
       menuItems.push({ label: "Add members", onClick: () => opts.onAddMembers() });
+    }
+    if (canLeave) {
+      menuItems.push({
+        label: "Leave group",
+        onClick: () => opts.onLeaveGroup(),
+      });
     }
     if (canDeleteGroup) {
       menuItems.push({
@@ -326,6 +402,17 @@ export function renderThread(
     if (menuItems.length) {
       actions.append(buildHeaderMenu(menuItems));
     }
+  }
+
+  // Browse-only public: no message body.
+  if (browsePublic) {
+    messagesEl.dataset.threadId = chat.id;
+    messagesEl.innerHTML = `
+      <div class="empty">
+        <div class="empty__card">Join this public group to see messages and chat.</div>
+      </div>
+    `;
+    return;
   }
 
   // —— Messages: reconcile keyed rows instead of wiping innerHTML, so unchanged

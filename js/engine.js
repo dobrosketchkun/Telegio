@@ -13,7 +13,16 @@ import { sanitizeFileName } from "./media.js";
  *   contPub?: string,
  *   online?: boolean,
  * }} RosterEntry
- * @typedef {{ id: string, type: "dm" | "group", title?: string, memberPeerIds: string[], createdBy: string, createdAt: number }} Chat
+ * @typedef {"private" | "public" | "everyone"} GroupMode
+ * @typedef {{
+ *   id: string,
+ *   type: "dm" | "group",
+ *   title?: string,
+ *   memberPeerIds: string[],
+ *   createdBy: string,
+ *   createdAt: number,
+ *   mode?: GroupMode,
+ * }} Chat
  * @typedef {{
  *   id: string,
  *   chatId: string,
@@ -97,8 +106,16 @@ export function isHostPeer(state, peerId) {
   return getHostPeerId(state) === peerId;
 }
 
+/** @param {Chat | undefined | null} chat @returns {GroupMode} */
+export function groupModeOf(chat) {
+  const m = chat?.mode;
+  if (m === "public" || m === "everyone") return m;
+  return "private";
+}
+
 /**
  * Groups + messages visible to a peer. Host admin sees all groups.
+ * Public groups are visible to non-members as metadata-only stubs (no messages).
  * @param {HostState} state
  * @param {string} peerId
  * @returns {HostState}
@@ -112,9 +129,16 @@ export function filterHostStateForPeer(state, peerId) {
   /** @type {Record<string, Message[]>} */
   const groupMessages = {};
   for (const [id, chat] of Object.entries(snap.groups)) {
-    if (!chat.memberPeerIds.includes(peerId)) continue;
-    groups[id] = chat;
-    groupMessages[id] = snap.groupMessages[id] || [];
+    const member = chat.memberPeerIds.includes(peerId);
+    if (member) {
+      groups[id] = chat;
+      groupMessages[id] = snap.groupMessages[id] || [];
+      continue;
+    }
+    if (groupModeOf(chat) === "public") {
+      groups[id] = chat;
+      groupMessages[id] = [];
+    }
   }
   return { ...snap, groups, groupMessages };
 }
@@ -280,12 +304,22 @@ export function applyHost(state, action, ctx) {
 
     case "create-group": {
       const title = String(action.title || "").trim() || "Group";
-      const memberPeerIds = uniqueStrings([
-        actor,
-        ...(Array.isArray(action.memberPeerIds) ? action.memberPeerIds : []),
-      ]);
-      if (memberPeerIds.length < 2) {
-        return { ok: false, error: "Group needs at least 2 members" };
+      const mode = normalizeGroupMode(action.mode);
+      /** @type {string[]} */
+      let memberPeerIds;
+      if (mode === "everyone") {
+        memberPeerIds = uniqueStrings(next.roster.map((r) => r.peerId));
+        if (!memberPeerIds.includes(actor)) memberPeerIds.push(actor);
+      } else if (mode === "public") {
+        memberPeerIds = [actor];
+      } else {
+        memberPeerIds = uniqueStrings([
+          actor,
+          ...(Array.isArray(action.memberPeerIds) ? action.memberPeerIds : []),
+        ]);
+        if (memberPeerIds.length < 2) {
+          return { ok: false, error: "Group needs at least 2 members" };
+        }
       }
       for (const pid of memberPeerIds) {
         if (!rosterHas(next, pid)) {
@@ -295,15 +329,52 @@ export function applyHost(state, action, ctx) {
       const id = mintId("g");
       const chat = {
         id,
-        type: "group",
+        type: /** @type {const} */ ("group"),
         title,
         memberPeerIds,
         createdBy: actor,
         createdAt: Date.now(),
+        mode,
       };
       next.groups[id] = chat;
       next.groupMessages[id] = [];
       effects.push({ event: "chat-created", chat });
+      return { ok: true, state: next, effects };
+    }
+
+    case "join-group": {
+      const chatId = action.chatId;
+      if (!chatId || !next.groups[chatId]) {
+        return { ok: false, error: "Unknown group" };
+      }
+      const chat = next.groups[chatId];
+      if (groupModeOf(chat) !== "public") {
+        return { ok: false, error: "Only public groups can be joined freely" };
+      }
+      if (chat.memberPeerIds.includes(actor)) {
+        return { ok: false, error: "Already in this group" };
+      }
+      chat.memberPeerIds = [...chat.memberPeerIds, actor];
+      effects.push({
+        event: "chat-created",
+        chat: clone(chat),
+        messages: clone(next.groupMessages[chatId] || []),
+      });
+      const actorName =
+        next.roster.find((r) => r.peerId === actor)?.displayName || "Someone";
+      const sys = {
+        id: mintId("sys"),
+        chatId,
+        senderPeerId: "",
+        createdAt: Date.now(),
+        kind: /** @type {const} */ ("system"),
+        text: `${actorName} joined`,
+      };
+      next.groupMessages[chatId] = [
+        ...(next.groupMessages[chatId] || []),
+        sys,
+      ];
+      effects.push({ event: "message-added", chatId, message: sys });
       return { ok: true, state: next, effects };
     }
 
@@ -316,6 +387,9 @@ export function applyHost(state, action, ctx) {
         return { ok: false, error: "Unknown group" };
       }
       const chat = next.groups[chatId];
+      if (groupModeOf(chat) === "everyone") {
+        return { ok: false, error: "Everyone is already in this group" };
+      }
       const canAdd =
         isHostPeer(next, actor) || chat.memberPeerIds.includes(actor);
       if (!canAdd) {
@@ -592,9 +666,15 @@ export function applyHost(state, action, ctx) {
         return { ok: false, error: "Only the host or group creator can delete" };
       }
       const members = [...group.memberPeerIds];
+      const wasPublic = groupModeOf(group) === "public";
       delete next.groups[chatId];
       delete next.groupMessages[chatId];
-      effects.push({ event: "chat-deleted", chatId, memberPeerIds: members });
+      effects.push({
+        event: "chat-deleted",
+        chatId,
+        memberPeerIds: members,
+        publicStub: wasPublic,
+      });
       return { ok: true, state: next, effects };
     }
 
@@ -604,6 +684,9 @@ export function applyHost(state, action, ctx) {
         return { ok: false, error: "Unknown group" };
       }
       const chat = next.groups[chatId];
+      if (groupModeOf(chat) === "everyone") {
+        return { ok: false, error: "Cannot leave an Everyone group" };
+      }
       if (!chat.memberPeerIds.includes(actor)) {
         return { ok: false, error: "Not a group member" };
       }
@@ -611,7 +694,7 @@ export function applyHost(state, action, ctx) {
         return { ok: false, error: "Host cannot leave groups; delete instead" };
       }
       chat.memberPeerIds = chat.memberPeerIds.filter((p) => p !== actor);
-      // Keep the group even if only one member remains — only kebab Delete group removes it.
+      // Keep the group — public leavers see name-only again; private undersized stays.
       effects.push({ event: "chat-created", chat: clone(chat) });
       return { ok: true, state: next, effects };
     }
@@ -1334,8 +1417,34 @@ export function listChatsForUi(hostState, dmState, selfPeerId) {
   const items = [];
   const asHost = isHostPeer(hostState, selfPeerId);
 
+  /** @type {typeof items} */
+  const joined = [];
+  /** @type {typeof items} */
+  const publicBrowse = [];
+
   for (const chat of Object.values(hostState.groups)) {
-    if (!asHost && !chat.memberPeerIds.includes(selfPeerId)) continue;
+    const mode = groupModeOf(chat);
+    const isMember = chat.memberPeerIds.includes(selfPeerId);
+    if (!isMember && mode !== "public") continue;
+    // Host sees private groups they're not in via filter — still list only if member
+    // unless public browse. Host is usually a member of groups they care about;
+    // for private non-member host admin views, skip browse list (they're in full state).
+    if (!isMember && mode === "public") {
+      publicBrowse.push({
+        id: chat.id,
+        kind: "group",
+        title: chat.title || "Public group",
+        preview: "",
+        updatedAt: chat.createdAt,
+        memberPeerIds: chat.memberPeerIds,
+        mode: "public",
+        joined: false,
+        offline: false,
+      });
+      continue;
+    }
+    if (!isMember && !asHost) continue;
+    if (!isMember) continue; // host non-member private: omit from rail
     const msgs = hostState.groupMessages[chat.id] || [];
     const last = msgs[msgs.length - 1];
     const others = chat.memberPeerIds.filter((p) => p !== selfPeerId);
@@ -1345,13 +1454,15 @@ export function listChatsForUi(hostState, dmState, selfPeerId) {
         const r = hostState.roster.find((e) => e.peerId === p);
         return r && r.online === false;
       });
-    items.push({
+    joined.push({
       id: chat.id,
       kind: "group",
       title: chat.title || "Group",
       preview: previewText(last),
       updatedAt: last?.createdAt || chat.createdAt,
       memberPeerIds: chat.memberPeerIds,
+      mode,
+      joined: true,
       offline,
     });
   }
@@ -1362,7 +1473,7 @@ export function listChatsForUi(hostState, dmState, selfPeerId) {
     const other = hostState.roster.find((r) => r.peerId === otherId);
     const msgs = dmState.dmMessages[chat.id] || [];
     const last = msgs[msgs.length - 1];
-    items.push({
+    joined.push({
       id: chat.id,
       kind: "dm",
       title: other?.displayName || otherId || "DM",
@@ -1371,12 +1482,18 @@ export function listChatsForUi(hostState, dmState, selfPeerId) {
       memberPeerIds: chat.memberPeerIds,
       tripPeerId: otherId,
       trip: other?.trip,
+      joined: true,
       offline: Boolean(other && other.online === false),
     });
   }
 
-  items.sort((a, b) => b.updatedAt - a.updatedAt);
-  return items;
+  joined.sort((a, b) => b.updatedAt - a.updatedAt);
+  publicBrowse.sort((a, b) =>
+    String(a.title).localeCompare(String(b.title), undefined, {
+      sensitivity: "base",
+    }),
+  );
+  return [...joined, ...publicBrowse];
 }
 
 /**
@@ -1442,6 +1559,54 @@ export function fanoutPeerIdsForGroup(state, chatId) {
   const set = new Set(chat?.memberPeerIds || []);
   if (hostId) set.add(hostId);
   return [...set];
+}
+
+/** True when an effect about this chat should reach the whole roster (public stubs). */
+export function effectNeedsRosterFanout(state, effect) {
+  if (!effect) return false;
+  if (effect.event === "chat-deleted" && effect.chatId) {
+    // Deleted public groups: fan out to everyone so stubs disappear.
+    // We can't read the chat anymore — callers pass prior mode via effect.publicStub.
+    return Boolean(effect.publicStub);
+  }
+  if (effect.event !== "chat-created" || !effect.chat) return false;
+  if (groupModeOf(effect.chat) !== "public") return false;
+  // History payloads (join / add-members) are member sync — not name-only stubs.
+  if (Array.isArray(effect.messages)) return false;
+  return true;
+}
+
+/**
+ * Add a peer to every Everyone group they are missing from.
+ * @param {HostState} state
+ * @param {string} peerId
+ * @returns {{ state: HostState, effects: Effect[] }}
+ */
+export function enrollPeerInEveryoneGroups(state, peerId) {
+  if (!state || !peerId || !rosterHas(state, peerId)) {
+    return { state, effects: [] };
+  }
+  const next = clone(state);
+  /** @type {Effect[]} */
+  const effects = [];
+  for (const chat of Object.values(next.groups)) {
+    if (groupModeOf(chat) !== "everyone") continue;
+    if (chat.memberPeerIds.includes(peerId)) continue;
+    chat.memberPeerIds = [...chat.memberPeerIds, peerId];
+    effects.push({
+      event: "chat-created",
+      chat: clone(chat),
+      messages: clone(next.groupMessages[chat.id] || []),
+      memberPeerIds: [peerId],
+    });
+  }
+  return { state: next, effects };
+}
+
+/** @param {unknown} mode @returns {GroupMode} */
+function normalizeGroupMode(mode) {
+  if (mode === "public" || mode === "everyone") return mode;
+  return "private";
 }
 
 /**
