@@ -397,6 +397,7 @@ textarea {
 }
 
 .modal__panel {
+  margin: 0;
   width: min(420px, 100%);
   background: #fff;
   border-radius: 14px;

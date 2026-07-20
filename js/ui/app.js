@@ -101,6 +101,7 @@ const els = {
   sidebarResize: document.querySelector("#sidebar-resize"),
   rosterHint: document.querySelector("#roster-hint"),
   modal: document.querySelector("#modal"),
+  modalForm: document.querySelector("#modal-form"),
   modalTitle: document.querySelector("#modal-title"),
   modalBody: document.querySelector("#modal-body"),
   modalCancel: document.querySelector("#modal-cancel"),
@@ -995,23 +996,38 @@ function renameSessionPrompt() {
       ? session?.role === "host"
       : isHostPeer(store.hostState, store.selfPeerId);
   if (!asHost) return;
-  const next = prompt(
-    "Session title",
-    store.hostState.session.title || "Session",
+  const current = store.hostState.session.title || "Session";
+  openModal(
+    "Rename session",
+    (body) => {
+      const field = document.createElement("label");
+      field.className = "field";
+      field.innerHTML = `<span>Title</span><input id="rename-title" maxlength="80" />`;
+      body.append(field);
+      const input = field.querySelector("input");
+      if (input) input.value = current;
+    },
+    () => {
+      const title =
+        els.modalBody.querySelector("#rename-title")?.value?.trim() || "";
+      if (!title) {
+        showBanner("Title cannot be empty", false);
+        return;
+      }
+      closeModal();
+      if (mode === "online" && session) session.renameSession(title);
+      else if (mode === "fixture" && fixtureStore) {
+        const r = applyHost(
+          fixtureStore.hostState,
+          { type: "admin-rename-session", title },
+          { actorPeerId: fixtureStore.selfPeerId },
+        );
+        if (r.ok) fixtureStore = { ...fixtureStore, hostState: r.state };
+        paint();
+      }
+    },
+    "Save",
   );
-  if (next == null) return;
-  const title = next.trim();
-  if (!title) return;
-  if (mode === "online" && session) session.renameSession(title);
-  else if (mode === "fixture" && fixtureStore) {
-    const r = applyHost(
-      fixtureStore.hostState,
-      { type: "admin-rename-session", title },
-      { actorPeerId: fixtureStore.selfPeerId },
-    );
-    if (r.ok) fixtureStore = { ...fixtureStore, hostState: r.state };
-    paint();
-  }
 }
 
 function enterAppShell({ badge, status, inviteUrl }) {
@@ -1541,6 +1557,35 @@ function closeModal() {
   }
 }
 
+function isModalOpen() {
+  return Boolean(els.modal && !els.modal.hidden);
+}
+
+/** Confirm the open modal (Enter / primary button), if OK is available. */
+function confirmModal() {
+  if (!isModalOpen()) return;
+  if (!modalConfirm) return;
+  if (els.modalOk?.hidden || els.modalOk?.disabled) return;
+  modalConfirm();
+}
+
+function focusModalPrimary() {
+  if (!els.modalBody) return;
+  const field = els.modalBody.querySelector(
+    "input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=file]), textarea, select",
+  );
+  if (field && typeof field.focus === "function") {
+    field.focus();
+    if (typeof field.select === "function" && field.matches("input, textarea")) {
+      field.select();
+    }
+    return;
+  }
+  if (els.modalOk && !els.modalOk.hidden && !els.modalOk.disabled) {
+    els.modalOk.focus();
+  }
+}
+
 function openModal(title, bodyBuilder, onOk, okLabel = "OK") {
   els.modalTitle.textContent = title;
   els.modalBody.innerHTML = "";
@@ -1552,6 +1597,8 @@ function openModal(title, bodyBuilder, onOk, okLabel = "OK") {
     els.modalOk.disabled = false;
   }
   els.modal.hidden = false;
+  // After paint so the field is focusable; Enter then submits the modal form.
+  requestAnimationFrame(() => focusModalPrimary());
 }
 
 /**
@@ -2573,6 +2620,11 @@ window.addEventListener("keydown", (e) => {
     }
   }
   if (e.key === "Escape") {
+    if (isModalOpen()) {
+      e.preventDefault();
+      closeModal();
+      return;
+    }
     closeLightbox();
     closeSidebarMenu();
   }
@@ -2649,8 +2701,9 @@ els.btnEndSession?.addEventListener("click", () => {
 els.sessionLabel?.addEventListener("click", renameSessionPrompt);
 els.pickerToggle?.addEventListener("click", togglePicker);
 els.modalCancel?.addEventListener("click", closeModal);
-els.modalOk?.addEventListener("click", () => {
-  modalConfirm?.();
+els.modalForm?.addEventListener("submit", (e) => {
+  e.preventDefault();
+  confirmModal();
 });
 els.modal?.addEventListener("click", (e) => {
   if (e.target === els.modal) closeModal();
@@ -2758,7 +2811,10 @@ if (isFixtureMode()) {
   els.landingForm.addEventListener("submit", (e) => {
     e.preventDefault();
     const displayName = els.landingName.value.trim();
-    if (!displayName) return;
+    if (!displayName) {
+      els.landingName?.focus();
+      return;
+    }
     const password = els.landingPassword?.value || "";
     const tripcode = els.identityCode?.value || "";
     clearResume();
@@ -2782,4 +2838,9 @@ if (isFixtureMode()) {
       );
     }
   });
+
+  // Enter in any landing field submits the form (native); focus name for typing.
+  if (!els.landing.hidden) {
+    els.landingName?.focus();
+  }
 }
