@@ -586,10 +586,12 @@ export function applyHost(state, action, ctx) {
       if (!chatId || !next.groups[chatId]) {
         return { ok: false, error: "Unknown group" };
       }
-      if (!isHostPeer(next, actor)) {
-        return { ok: false, error: "Only host can delete groups" };
+      const group = next.groups[chatId];
+      // Session host can delete any group; the creator can delete their own.
+      if (!isHostPeer(next, actor) && group.createdBy !== actor) {
+        return { ok: false, error: "Only the host or group creator can delete" };
       }
-      const members = [...next.groups[chatId].memberPeerIds];
+      const members = [...group.memberPeerIds];
       delete next.groups[chatId];
       delete next.groupMessages[chatId];
       effects.push({ event: "chat-deleted", chatId, memberPeerIds: members });

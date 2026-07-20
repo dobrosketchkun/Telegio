@@ -369,9 +369,11 @@ function paint() {
   }
 
   const ended = mode === "online" ? session?.sessionEnded : false;
+  // Prefer live role, but also trust roster host bit (resume / permanent handoff).
   const asHost =
     mode === "online"
-      ? session?.role === "host"
+      ? session?.role === "host" ||
+        isHostPeer(store.hostState, store.selfPeerId)
       : isHostPeer(store.hostState, store.selfPeerId);
 
   const sid = store.hostState?.session?.id || "";
@@ -453,11 +455,25 @@ function paint() {
       subtitle:
         mode === "fixture" ? "Fixture mode — no network" : "Online session",
       onDeleteGroup: () => {
-        if (mode === "online" && session && activeChatId) {
+        if (!activeChatId) return;
+        if (mode === "online" && session) {
           session.dispatchHostAction({
             type: "delete-group",
             chatId: activeChatId,
           });
+        } else if (mode === "fixture" && fixtureStore) {
+          const r = applyHost(
+            fixtureStore.hostState,
+            { type: "delete-group", chatId: activeChatId },
+            { actorPeerId: fixtureStore.selfPeerId },
+          );
+          if (r.ok) {
+            fixtureStore = { ...fixtureStore, hostState: r.state };
+            activeChatId = null;
+            paint();
+          } else {
+            showBanner(r.error || "Could not delete group", false);
+          }
         }
       },
       onAddMembers: () => openAddMembersModal(),

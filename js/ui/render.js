@@ -269,11 +269,12 @@ export function renderThread(
     kind === "group" &&
     !opts.sessionEnded &&
     typeof opts.onAddMembers === "function";
+  // Kebab Delete group: session host (any group) or the member who created it.
   const canDeleteGroup =
     kind === "group" &&
-    opts.isHost &&
     !opts.sessionEnded &&
-    typeof opts.onDeleteGroup === "function";
+    typeof opts.onDeleteGroup === "function" &&
+    (opts.isHost || chat.createdBy === selfPeerId);
   const headerSig = [
     chat.id,
     title,
