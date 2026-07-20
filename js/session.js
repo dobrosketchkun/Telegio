@@ -2310,6 +2310,14 @@ export class ChatSession {
         continue;
       }
 
+      // Public name-only stubs must reach non-members. Use room broadcast (same
+      // path as roster) — per-peer targeted sends often never land for peers
+      // who aren't already chatting with the host (buffered ECDH / no path).
+      if (effectNeedsRosterFanout(this.hostState, effect)) {
+        this._send(encodeFrame("event", versionedEffect));
+        continue;
+      }
+
       let targets = [];
       // Targeted enroll (Everyone late-join) or explicit memberPeerIds on effect.
       if (
@@ -2318,12 +2326,10 @@ export class ChatSession {
         effect.event === "chat-created"
       ) {
         targets = [...effect.memberPeerIds];
-      } else if (effectNeedsRosterFanout(this.hostState, effect)) {
-        targets = this.hostState.roster.map((r) => r.peerId);
       } else if (effect.event === "chat-deleted" && effect.memberPeerIds) {
         targets = [...effect.memberPeerIds];
       } else if (effect.event === "chat-created" && effect.chat) {
-        // Public stubs use effectNeedsRosterFanout above; history sync stays members-only.
+        // History sync (join / add-members) stays members-only.
         targets = [...effect.chat.memberPeerIds];
       } else if (effect.event === "session-renamed") {
         targets = [...this.connectedPeers];

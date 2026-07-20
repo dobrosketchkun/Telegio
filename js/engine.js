@@ -338,7 +338,12 @@ export function applyHost(state, action, ctx) {
       };
       next.groups[id] = chat;
       next.groupMessages[id] = [];
-      effects.push({ event: "chat-created", chat });
+      effects.push({
+        event: "chat-created",
+        chat: clone(chat),
+        // Hint for wire fanout (public stubs → whole swarm).
+        publicStub: mode === "public",
+      });
       return { ok: true, state: next, effects };
     }
 
@@ -695,7 +700,11 @@ export function applyHost(state, action, ctx) {
       }
       chat.memberPeerIds = chat.memberPeerIds.filter((p) => p !== actor);
       // Keep the group — public leavers see name-only again; private undersized stays.
-      effects.push({ event: "chat-created", chat: clone(chat) });
+      effects.push({
+        event: "chat-created",
+        chat: clone(chat),
+        publicStub: groupModeOf(chat) === "public",
+      });
       return { ok: true, state: next, effects };
     }
 
@@ -1570,10 +1579,10 @@ export function effectNeedsRosterFanout(state, effect) {
     return Boolean(effect.publicStub);
   }
   if (effect.event !== "chat-created" || !effect.chat) return false;
-  if (groupModeOf(effect.chat) !== "public") return false;
   // History payloads (join / add-members) are member sync — not name-only stubs.
   if (Array.isArray(effect.messages)) return false;
-  return true;
+  if (effect.publicStub === true) return true;
+  return groupModeOf(effect.chat) === "public";
 }
 
 /**

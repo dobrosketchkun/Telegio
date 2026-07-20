@@ -50,6 +50,9 @@ test("create public with one member; outsider filter is title-only", () => {
   const chatId = Object.keys(state.groups)[0];
   assert.deepEqual(state.groups[chatId].memberPeerIds, ["g1"]);
   assert.equal(state.groups[chatId].mode, "public");
+  const createFx = created.effects.find((e) => e.event === "chat-created");
+  assert.equal(createFx.publicStub, true);
+  assert.equal(effectNeedsRosterFanout(state, createFx), true);
 
   // Seed a message only members should see.
   const sent = applyHost(

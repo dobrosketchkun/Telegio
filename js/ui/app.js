@@ -384,12 +384,17 @@ function paint() {
     store.dmState,
     store.selfPeerId,
   );
-  chats = [...chats].sort((a, b) => {
+  // Pin/recency sort joined chats only; keep browse-only public rows after the
+  // separator (listChatsForUi already appends them last, sorted by title).
+  const joinedChats = chats.filter((c) => c.joined !== false);
+  const browsePublic = chats.filter((c) => c.joined === false);
+  joinedChats.sort((a, b) => {
     const ap = prefs.pinnedChatIds.includes(a.id) ? 1 : 0;
     const bp = prefs.pinnedChatIds.includes(b.id) ? 1 : 0;
     if (ap !== bp) return bp - ap;
     return b.updatedAt - a.updatedAt;
   });
+  chats = [...joinedChats, ...browsePublic];
   if (activeChatId && !chats.some((c) => c.id === activeChatId)) {
     activeChatId = null;
     clearReply();
