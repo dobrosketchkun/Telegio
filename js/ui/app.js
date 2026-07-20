@@ -299,15 +299,16 @@ function trackUnread(store) {
       if (msg.senderPeerId === store.selfPeerId) continue;
       if (msg.kind === "system") continue;
 
-      const viewingThisChat = chat.id === activeChatId && !document.hidden;
+      // Skip tray/unread only when the user is actually looking at this chat.
+      const viewingThisChat = chat.id === activeChatId && isPageEngaged();
       if (viewingThisChat) continue;
 
       if (chat.id !== activeChatId) {
         unread[chat.id] = (unread[chat.id] || 0) + 1;
       }
 
-      // Tray: background tab, or focused but another chat (Mute already skipped).
-      if (document.hidden || chat.id !== activeChatId) {
+      // Tray: background/unfocused tab, or focused but another chat.
+      if (!isPageEngaged() || chat.id !== activeChatId) {
         const chatId = chat.id;
         notifyNewMessage({
           chatId,
@@ -809,18 +810,60 @@ function paint() {
 }
 
 let paintScheduled = false;
+let paintRafId = 0;
+let paintTimerId = 0;
+
+/** True when the user can see and focus this tab (not backgrounded / alt-tabbed). */
+function isPageEngaged() {
+  if (typeof document === "undefined") return true;
+  if (document.hidden) return false;
+  if (typeof document.hasFocus === "function" && !document.hasFocus()) {
+    return false;
+  }
+  return true;
+}
+
 /**
  * Coalesce bursts of network-driven onChange events into a single repaint per frame,
  * so acks/presence/media-chunk traffic can't cause a storm of full repaints.
+ * Background tabs pause rAF — use setTimeout there so unread + desktop notifications
+ * still run while the tab is inactive.
  */
 function schedulePaint() {
   if (paintScheduled) return;
   paintScheduled = true;
-  requestAnimationFrame(() => {
+  const run = () => {
     paintScheduled = false;
+    paintRafId = 0;
+    if (paintTimerId) {
+      clearTimeout(paintTimerId);
+      paintTimerId = 0;
+    }
     paint();
-  });
+  };
+  if (document.hidden) {
+    paintTimerId = setTimeout(run, 0);
+  } else {
+    paintRafId = requestAnimationFrame(run);
+  }
 }
+
+// If a paint was queued via rAF and the tab is then hidden, rAF never fires.
+// Retarget the pending work onto a timer so notifications are not stuck.
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden || !paintScheduled) return;
+  if (paintRafId) {
+    cancelAnimationFrame(paintRafId);
+    paintRafId = 0;
+  }
+  if (!paintTimerId) {
+    paintTimerId = setTimeout(() => {
+      paintScheduled = false;
+      paintTimerId = 0;
+      paint();
+    }, 0);
+  }
+});
 
 function reactToMessage(messageId, emoji) {
   const store = getStore();
