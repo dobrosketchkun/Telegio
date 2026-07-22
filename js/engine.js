@@ -1456,13 +1456,6 @@ export function listChatsForUi(hostState, dmState, selfPeerId) {
     if (!isMember) continue; // host non-member private: omit from rail
     const msgs = hostState.groupMessages[chat.id] || [];
     const last = msgs[msgs.length - 1];
-    const others = chat.memberPeerIds.filter((p) => p !== selfPeerId);
-    const offline =
-      others.length > 0 &&
-      others.every((p) => {
-        const r = hostState.roster.find((e) => e.peerId === p);
-        return r && r.online === false;
-      });
     joined.push({
       id: chat.id,
       kind: "group",
@@ -1472,7 +1465,8 @@ export function listChatsForUi(hostState, dmState, selfPeerId) {
       memberPeerIds: chat.memberPeerIds,
       mode,
       joined: true,
-      offline,
+      // Groups aren't "offline" — that label is for 1:1 DMs only.
+      offline: false,
     });
   }
 

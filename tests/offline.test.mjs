@@ -166,7 +166,7 @@ test("mergeHostSnapshots keeps absent peers offline instead of pruning", () => {
   assert.equal(merged.roster.find((r) => r.peerId === "host")?.online, true);
 });
 
-test("listChatsForUi marks offline DMs/groups", () => {
+test("listChatsForUi marks offline DMs only (not groups)", () => {
   let state = addRosterPeer(baseState(), { peerId: "g1", displayName: "G1" });
   state = setRosterOnline(state, "g1", false);
   state = applyHost(
@@ -184,7 +184,10 @@ test("listChatsForUi marks offline DMs/groups", () => {
   };
   dmState.dmMessages["dm:g1:host"] = [];
   const chats = listChatsForUi(state, dmState, "host");
-  assert.ok(chats.every((c) => c.offline === true));
+  const dm = chats.find((c) => c.kind === "dm");
+  const group = chats.find((c) => c.kind === "group");
+  assert.equal(dm?.offline, true);
+  assert.equal(group?.offline, false);
 });
 
 test("continuity key signs and verifies peerId", async () => {

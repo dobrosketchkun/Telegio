@@ -173,6 +173,8 @@ export class ChatSession {
     this._electionEpoch = 0;
     this._continuing = false;
     this._permanentHostMissing = false;
+    /** @type {Map<string, ReturnType<typeof setTimeout>>} delayed soft-offline marks */
+    this._offlineTimers = new Map();
   }
 
   /**
@@ -472,6 +474,7 @@ export class ChatSession {
     this._stopHelloRetry();
     this._stopDiag();
     this._clearHostGrace();
+    this._clearSoftOfflineTimers();
     this._clearElectionTimers();
     if (
       endSession &&
@@ -1333,25 +1336,46 @@ export class ChatSession {
 
     room.onPeerJoin = (peerId) => {
       this.connectedPeers.add(peerId);
+      this._cancelSoftOffline(peerId);
       const pc = room.getPeers?.()?.[peerId];
       log("peer", "join", peerId, {
         ice: pc?.iceConnectionState,
         conn: pc?.connectionState,
         peers: [...this.connectedPeers],
       });
-      if (this.role === "host") {
-        this._awaitingHello.add(peerId);
-        // Guest hello can race before the data channel is up — nudge them.
-        window.setTimeout(() => {
-          if (this._awaitingHello.has(peerId)) {
-            log("host", "hello-request →", peerId);
-            this._send(encodeFrame("hello-request", {}), peerId);
-          }
-        }, 800);
+      // Path flaps used to mark soft-offline and never clear it (hello only
+      // runs once). Any live path for a known roster peer means online again.
+      if (this.role === "host" && this.hostState) {
+        const entry = this.hostState.roster.find((r) => r.peerId === peerId);
+        if (entry && entry.online === false) {
+          this.hostState = setRosterOnline(this.hostState, peerId, true);
+          this.hostState = bumpHostRevision(this.hostState);
+          this._broadcastRoster();
+        }
+        if (!entry) {
+          this._awaitingHello.add(peerId);
+          // Guest hello can race before the data channel is up — nudge them.
+          window.setTimeout(() => {
+            if (this._awaitingHello.has(peerId)) {
+              log("host", "hello-request →", peerId);
+              this._send(encodeFrame("hello-request", {}), peerId);
+            }
+          }, 800);
+        } else {
+          this._awaitingHello.delete(peerId);
+        }
       }
       if (this.role === "candidate") {
         this._candidateIds.add(peerId);
         this._sendRoomPresence(peerId);
+      }
+      if (this.role === "guest" && this.hostState) {
+        const hostId = this._hostHint || getHostPeerId(this.hostState);
+        if (peerId === hostId && hostId) {
+          this.hostState = setRosterOnline(this.hostState, peerId, true);
+          this._permanentHostMissing = false;
+          this._clearHostGrace();
+        }
       }
       if (
         this.role === "guest" &&
@@ -1376,17 +1400,15 @@ export class ChatSession {
       this._awaitingHello.delete(peerId);
       if (this.role === "host" && this.hostState) {
         // Soft-offline only — keep roster membership and all groups/chats.
+        // Delay the mark: multipath/ICE flaps briefly drop peers who are still here.
         if (this.hostState.roster.some((r) => r.peerId === peerId)) {
-          this.hostState = setRosterOnline(this.hostState, peerId, false);
-          this.hostState = bumpHostRevision(this.hostState);
-          this._broadcastRoster();
-          this.hooks.onChange();
+          this._scheduleSoftOffline(peerId);
         }
       }
       if (this.role === "guest" && this.hostState) {
         const hostId = this._hostHint || getHostPeerId(this.hostState);
         if (peerId === hostId) {
-          this.hostState = setRosterOnline(this.hostState, peerId, false);
+          this._scheduleSoftOffline(peerId);
           if (this.roomMode === "permanent") {
             this._permanentHostMissing = true;
             this.hooks.onStatus("Host reconnecting (30s)");
@@ -1421,6 +1443,64 @@ export class ChatSession {
       clearTimeout(this._hostGraceTimer);
       this._hostGraceTimer = null;
     }
+  }
+
+  /** @param {string} peerId */
+  _cancelSoftOffline(peerId) {
+    const t = this._offlineTimers.get(peerId);
+    if (t) {
+      clearTimeout(t);
+      this._offlineTimers.delete(peerId);
+    }
+  }
+
+  /**
+   * If a known roster peer is marked offline but is actively sending, fix it.
+   * @param {string} peerId
+   */
+  _touchRosterOnline(peerId) {
+    if (!peerId || !this.hostState) return;
+    const entry = this.hostState.roster.find((r) => r.peerId === peerId);
+    if (!entry || entry.online !== false) return;
+    this._cancelSoftOffline(peerId);
+    this.connectedPeers.add(peerId);
+    this.hostState = setRosterOnline(this.hostState, peerId, true);
+    if (this.role === "host") {
+      this.hostState = bumpHostRevision(this.hostState);
+      this._broadcastRoster();
+    }
+    this.hooks.onChange();
+  }
+
+  _clearSoftOfflineTimers() {
+    for (const t of this._offlineTimers.values()) clearTimeout(t);
+    this._offlineTimers.clear();
+  }
+
+  /**
+   * Mark a roster peer soft-offline after a short grace so ICE/multipath flaps
+   * do not stick "offline" on people who reconnect a moment later.
+   * @param {string} peerId
+   */
+  _scheduleSoftOffline(peerId) {
+    this._cancelSoftOffline(peerId);
+    const graceMs = 12_000;
+    this._offlineTimers.set(
+      peerId,
+      setTimeout(() => {
+        this._offlineTimers.delete(peerId);
+        if (this.connectedPeers.has(peerId)) return;
+        if (!this.hostState) return;
+        if (!this.hostState.roster.some((r) => r.peerId === peerId)) return;
+        this.hostState = setRosterOnline(this.hostState, peerId, false);
+        if (this.role === "host") {
+          this.hostState = bumpHostRevision(this.hostState);
+          this._broadcastRoster();
+        }
+        this.hooks.onStatus(this._statusLabel());
+        this.hooks.onChange();
+      }, graceMs),
+    );
   }
 
   _startHostGrace() {
@@ -1713,6 +1793,9 @@ export class ChatSession {
       console.warn("Bad frame", e);
       return;
     }
+
+    // Any live traffic from a roster peer clears a stuck soft-offline mark.
+    this._touchRosterOnline(peerId);
 
     if (
       isRoomControlFrame(type) &&
